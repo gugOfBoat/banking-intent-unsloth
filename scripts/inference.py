@@ -176,35 +176,81 @@ class IntentClassification:
 
 
 # ---------------------------------------------------------------------------
-# Standalone usage example
+# Standalone usage + full test set evaluation
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse
+    import pandas as pd
+    from sklearn.metrics import f1_score, accuracy_score, classification_report
 
     parser = argparse.ArgumentParser(description="Run intent classification inference")
     parser.add_argument("--config", default="configs/inference.yaml",
                         help="Path to inference config YAML")
-    parser.add_argument("--message", default="I want to top up my account",
-                        help="Input message to classify")
+    parser.add_argument("--message", default=None,
+                        help="Single message to classify")
+    parser.add_argument("--eval", action="store_true",
+                        help="Evaluate on full test set (sample_data/test.csv)")
     args = parser.parse_args()
 
     clf = IntentClassification(args.config)
 
-    # Single prediction
-    result = clf(args.message)
-    print(f"\n  Input:   {args.message}")
-    print(f"  Intent:  {result}")
+    if args.eval:
+        # ---- Full test set evaluation ----
+        test_path = Path(args.config).resolve().parent.parent / "sample_data" / "test.csv"
+        df = pd.read_csv(test_path)
+        print(f"\n{'='*60}")
+        print(f"  EVALUATING ON TEST SET: {len(df)} samples")
+        print(f"{'='*60}")
 
-    # Batch examples
-    examples = [
-        "My card just expired, when will I get a new one?",
-        "Why was I charged twice?",
-        "How do I change my PIN?",
-        "I want to transfer money to another account",
-        "What is my current balance?",
-    ]
-    print("\n  --- Batch examples ---")
-    for msg in examples:
-        label = clf(msg)
-        print(f"  [{label:<30s}] {msg}")
+        y_true, y_pred = [], []
+        for i, row in df.iterrows():
+            pred = clf(row["text"])
+            truth = row["intent"]
+            y_true.append(truth)
+            y_pred.append(pred)
+
+            mark = "✅" if pred == truth else "❌"
+            if i < 10 or pred != truth:  # show first 10 + all errors
+                print(f"  {mark} [{pred:<30s}] gt=[{truth}] | {row['text'][:60]}")
+
+        acc = accuracy_score(y_true, y_pred)
+        f1  = f1_score(y_true, y_pred, average="micro", zero_division=0)
+        f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+
+        print(f"\n{'='*60}")
+        print(f"  RESULTS")
+        print(f"{'='*60}")
+        print(f"  Accuracy:    {acc:.4f}  ({sum(1 for a,b in zip(y_true,y_pred) if a==b)}/{len(df)})")
+        print(f"  F1 (micro):  {f1:.4f}")
+        print(f"  F1 (macro):  {f1_macro:.4f}")
+
+        # Save results
+        results = {"accuracy": acc, "f1_micro": f1, "f1_macro": f1_macro,
+                   "total": len(df), "correct": sum(1 for a,b in zip(y_true,y_pred) if a==b)}
+        out_path = Path(args.config).resolve().parent.parent / "outputs" / "eval_results.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"  Results saved → {out_path}")
+
+    elif args.message:
+        # ---- Single prediction ----
+        result = clf(args.message)
+        print(f"\n  Input:   {args.message}")
+        print(f"  Intent:  {result}")
+
+    else:
+        # ---- Demo examples ----
+        examples = [
+            "My card just expired, when will I get a new one?",
+            "Why was I charged twice?",
+            "How do I change my PIN?",
+            "I want to transfer money to another account",
+            "What is my current balance?",
+        ]
+        print("\n  --- Demo examples ---")
+        for msg in examples:
+            label = clf(msg)
+            print(f"  [{label:<30s}] {msg}")
+
