@@ -1,6 +1,4 @@
-# Inference config
-# Path to the saved model checkpoint directory
+# Inference config — Config-Driven Development
 model_checkpoint: "outputs/run/checkpoint_final"
-
-# Maximum number of new tokens to generate
 max_new_tokens: 32
+label_map: "sample_data/label_map.json"   # for fuzzy-matching predictions
