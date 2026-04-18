@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+import unsloth  # MUST be imported before trl/transformers/peft
+
 import numpy as np
 import pandas as pd
 import torch
@@ -28,7 +30,6 @@ from datasets import Dataset, DatasetDict
 from sklearn.metrics import f1_score, accuracy_score, classification_report
 from trl import SFTTrainer, SFTConfig
 
-# train_on_responses_only lives in different places depending on trl version
 try:
     from trl import train_on_responses_only
 except ImportError:
@@ -45,7 +46,7 @@ OUT_DIR = ROOT / "outputs"
 # ---------------------------------------------------------------------------
 # Model / dataset constants
 # ---------------------------------------------------------------------------
-BASE_MODEL    = "unsloth/Qwen3.5-9B"
+BASE_MODEL    = "unsloth/Qwen3.5-9B-bnb-4bit"  # pre-quantized: ~5GB download, fits T4
 MAX_SEQ_LEN   = 512
 
 # ChatML instruction / response delimiters (Qwen default)
