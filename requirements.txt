@@ -1,0 +1,11 @@
+# Core
+pandas>=2.0
+requests>=2.31
+urllib3>=2.0
+
+# Hugging Face
+datasets>=2.14
+huggingface_hub>=0.20
+
+# YAML config
+pyyaml>=6.0
