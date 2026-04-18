@@ -69,6 +69,24 @@ def free_vram():
     gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
 
+
+def backup_to_drive(src_dir, drive_dest="/content/drive/MyDrive/banking-intent-outputs"):
+    """Copy checkpoint/outputs to Google Drive for persistence."""
+    import shutil
+    drive_root = Path("/content/drive")
+    if not drive_root.exists():
+        try:
+            from google.colab import drive
+            drive.mount(str(drive_root))
+        except Exception:
+            print("  [BACKUP] Not on Colab or Drive not available — skipping backup")
+            return
+    dest = Path(drive_dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    print(f"  [BACKUP] Copying {src_dir} → {dest} ...")
+    shutil.copytree(str(src_dir), str(dest / src_dir.name), dirs_exist_ok=True)
+    print(f"  [BACKUP] ✅ Saved to Google Drive: {dest / src_dir.name}")
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -294,6 +312,9 @@ def run_standard_training(cfg, out_dir):
     trainer.save_model(str(ckpt_dir))
     tokenizer.save_pretrained(str(ckpt_dir))
     print(f"  Checkpoint → {ckpt_dir}")
+
+    # Backup to Google Drive immediately (before eval which might crash)
+    backup_to_drive(out_dir)
 
     # Training log
     pd.DataFrame(trainer.state.log_history).to_csv(
