@@ -288,6 +288,7 @@ def run_standard_training(cfg, out_dir):
         dataset_text_field="text",
         max_seq_length=max_seq,
         packing=False,
+        dataset_num_proc=1,  # <--- FORCES SEQUENTIAL TO PREVENT FORK OOM
     )
 
     trainer = SFTTrainer(
@@ -399,6 +400,7 @@ def run_hpo(cfg, out_dir):
             dataset_text_field="text",
             max_seq_length=max_seq,
             packing=False,
+            dataset_num_proc=1,  # <--- FORCES SEQUENTIAL TO PREVENT FORK OOM
         )
 
         trainer = SFTTrainer(
