@@ -2,10 +2,21 @@
 pandas>=2.0
 requests>=2.31
 urllib3>=2.0
+pyyaml>=6.0
 
 # Hugging Face
 datasets>=2.14
 huggingface_hub>=0.20
+transformers>=4.40
+trl>=0.8.6
+peft>=0.10
 
-# YAML config
-pyyaml>=6.0
+# Unsloth  (install separately on Colab — see README)
+# pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+
+# HPO
+optuna>=3.6
+
+# Metrics
+scikit-learn>=1.4
+numpy>=1.24

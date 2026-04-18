@@ -1,0 +1,5 @@
+# Inference config
+# Used by scripts/inference.py
+
+model_checkpoint: "outputs/run/checkpoint_final"
+max_new_tokens: 32
