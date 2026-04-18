@@ -173,16 +173,19 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
     for i, row in df.iterrows():
         msgs = [{"role": "user",
                  "content": f"Classify the banking intent: {row['text']}"}]
-        prompt = tokenizer.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        # Use apply_chat_template with return_tensors to bypass VL image processor
+        input_ids = tokenizer.apply_chat_template(
+            msgs, tokenize=True, add_generation_prompt=True,
+            return_tensors="pt").to(model.device)
 
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=32,
+            out = model.generate(input_ids=input_ids, max_new_tokens=32,
                                  do_sample=False, use_cache=True)
 
-        gen_ids = out[0][inputs["input_ids"].shape[1]:]
+        gen_ids = out[0][input_ids.shape[1]:]
         raw = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+        # Strip Qwen3.5 <think>...</think> reasoning tags
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         pred = normalize(raw)
         if valid_labels:
             pred = fuzzy_match(pred, valid_labels)

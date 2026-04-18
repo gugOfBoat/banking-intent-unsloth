@@ -142,13 +142,14 @@ class IntentClassification:
         messages = [
             {"role": "user", "content": f"Classify the banking intent: {message}"},
         ]
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
+        # Use apply_chat_template with return_tensors to bypass VL image processor
+        input_ids = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+            return_tensors="pt",
+        ).to(self.model.device)
 
-        inputs  = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         outputs = self.model.generate(
-            **inputs,
+            input_ids=input_ids,
             max_new_tokens=self.max_new,
             do_sample=False,
             temperature=1.0,
@@ -156,8 +157,11 @@ class IntentClassification:
         )
 
         # Decode only newly generated tokens
-        gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
+        gen_ids = outputs[0][input_ids.shape[1]:]
         raw_output = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+        # Strip Qwen3.5 <think>...</think> reasoning tags
+        raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL).strip()
 
         # Normalize + fuzzy match
         normalized = normalize_prediction(raw_output)
