@@ -1,6 +1,12 @@
 """
 train.py  —  Fine-tune Qwen on BANKING77 intent classification with Unsloth.
 
+Requirements covered (Section 2.2 of project spec):
+  - Clearly document all hyperparameters        → configs/train.yaml
+  - Save model checkpoint after fine-tuning      → outputs/run/checkpoint_final
+  - Evaluate on independent test set             → final test eval after training
+  - VRAM / GPU monitoring                        → printed before & after training
+
 Modes
 -----
     python scripts/train.py                  # standard train from configs/train.yaml
@@ -8,15 +14,19 @@ Modes
 """
 
 import argparse
+import gc
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 import yaml
 from datasets import Dataset, DatasetDict
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, accuracy_score, classification_report
 from trl import SFTTrainer, SFTConfig, train_on_responses_only
 
 # ---------------------------------------------------------------------------
@@ -30,12 +40,36 @@ OUT_DIR = ROOT / "outputs"
 # ---------------------------------------------------------------------------
 # Model / dataset constants
 # ---------------------------------------------------------------------------
-BASE_MODEL    = "unsloth/Qwen2.5-7B"          # 7B ≈ 9B tier – fits T4 in 4-bit
+BASE_MODEL    = "unsloth/Qwen3.5-9B"
 MAX_SEQ_LEN   = 512
 
 # ChatML instruction / response delimiters (Qwen default)
 INSTR_PART    = "<|im_start|>user\n"
 RESP_PART     = "<|im_start|>assistant\n"
+
+# ---------------------------------------------------------------------------
+# GPU / VRAM Monitoring
+# ---------------------------------------------------------------------------
+
+def print_gpu_status(tag: str = ""):
+    """Print current GPU VRAM usage."""
+    if not torch.cuda.is_available():
+        print(f"  [{tag}] No GPU available")
+        return
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved  = torch.cuda.memory_reserved()  / 1024**3
+    total     = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    name      = torch.cuda.get_device_name()
+    print(f"  [{tag}] GPU: {name}")
+    print(f"  [{tag}] VRAM: {allocated:.2f} GB allocated / {reserved:.2f} GB reserved / {total:.2f} GB total")
+    print(f"  [{tag}] VRAM Free: ~{total - reserved:.2f} GB")
+
+
+def free_vram():
+    """Force garbage collection and clear CUDA cache."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 # ---------------------------------------------------------------------------
 # Config loader
@@ -50,7 +84,7 @@ def load_yaml(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def _row_to_messages(row: dict) -> dict:
-    """Convert a CSV row to ChatML messages + apply_chat_template."""
+    """Convert a CSV row to ChatML messages."""
     messages = [
         {"role": "user",      "content": f"Classify the banking intent: {row['text']}"},
         {"role": "assistant", "content": row["intent"]},
@@ -95,10 +129,8 @@ def compute_metrics(eval_preds):
     if isinstance(logits, tuple):
         logits = logits[0]
     preds = np.argmax(logits, axis=-1)
-    # Flatten (seq2seq models may add dim)
     preds  = preds.flatten()
     labels = labels.flatten()
-    # Ignore padding token (-100)
     mask = labels != -100
     micro_f1 = f1_score(labels[mask], preds[mask], average="micro",
                         zero_division=0)
@@ -108,16 +140,20 @@ def compute_metrics(eval_preds):
 # Unsloth model factory
 # ---------------------------------------------------------------------------
 
-def build_model(lr=2e-4, lora_r=16, lora_alpha=32):
+def build_model(lora_r=16, lora_alpha=32):
     """Load base model in 4-bit and wrap with LoRA PEFT."""
     from unsloth import FastLanguageModel
+
+    print_gpu_status("BEFORE model load")
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL,
         max_seq_length=MAX_SEQ_LEN,
-        dtype=None,          # auto detect
+        dtype=None,
         load_in_4bit=True,
     )
+
+    print_gpu_status("AFTER base model load (4-bit)")
 
     model = FastLanguageModel.get_peft_model(
         model,
@@ -127,18 +163,84 @@ def build_model(lr=2e-4, lora_r=16, lora_alpha=32):
         lora_alpha=lora_alpha,
         lora_dropout=0.05,
         bias="none",
-        use_gradient_checkpointing="unsloth",   # extreme VRAM savings
+        use_gradient_checkpointing="unsloth",
         random_state=42,
         use_rslora=True,
     )
+
+    print_gpu_status("AFTER LoRA PEFT applied")
     return model, tokenizer
+
+# ---------------------------------------------------------------------------
+# Test set evaluation (Section 2.2: evaluate on independent test set)
+# ---------------------------------------------------------------------------
+
+def evaluate_on_test(trainer, datasets, out_dir: Path):
+    """Run evaluation on the held-out test set and save report."""
+    print("\n" + "=" * 60)
+    print("  EVALUATING ON TEST SET")
+    print("=" * 60)
+
+    test_results = trainer.evaluate(eval_dataset=datasets["test"])
+    print(f"  Test F1 (micro): {test_results.get('eval_f1', 'N/A')}")
+    print(f"  Test Loss:       {test_results.get('eval_loss', 'N/A')}")
+
+    # Save test results
+    results_path = out_dir / "test_results.json"
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(test_results, f, indent=4, default=str)
+    print(f"  Results saved to {results_path}")
+
+    return test_results
+
+# ---------------------------------------------------------------------------
+# Save training summary (hyperparameters + metrics)
+# ---------------------------------------------------------------------------
+
+def save_training_summary(cfg: dict, train_result, test_results, out_dir: Path):
+    """Export a JSON file documenting all hyperparameters and results."""
+    summary = {
+        "model": BASE_MODEL,
+        "max_seq_length": MAX_SEQ_LEN,
+        "hyperparameters": {
+            "learning_rate": cfg.get("learning_rate"),
+            "lora_r": cfg.get("r"),
+            "lora_alpha": cfg.get("lora_alpha"),
+            "num_train_epochs": cfg.get("num_train_epochs"),
+            "per_device_train_batch_size": cfg.get("per_device_train_batch_size"),
+            "gradient_accumulation_steps": cfg.get("gradient_accumulation_steps"),
+            "effective_batch_size": (
+                cfg.get("per_device_train_batch_size", 4)
+                * cfg.get("gradient_accumulation_steps", 4)
+            ),
+            "optimizer": "adamw_8bit",
+            "lr_scheduler": "cosine",
+            "warmup_ratio": 0.03,
+            "lora_dropout": 0.05,
+            "gradient_checkpointing": "unsloth",
+            "quantization": "4-bit (NF4)",
+        },
+        "training_metrics": {
+            "total_steps": train_result.global_step if train_result else None,
+            "train_loss": train_result.training_loss if train_result else None,
+            "training_time_sec": train_result.metrics.get("train_runtime") if train_result else None,
+        },
+        "test_metrics": test_results,
+        "gpu": torch.cuda.get_device_name() if torch.cuda.is_available() else "N/A",
+        "peak_vram_gb": round(torch.cuda.max_memory_reserved() / 1024**3, 2) if torch.cuda.is_available() else None,
+    }
+
+    summary_path = out_dir / "training_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=4, default=str)
+    print(f"\n  Training summary saved to {summary_path}")
 
 # ---------------------------------------------------------------------------
 # Standard training (uses configs/train.yaml)
 # ---------------------------------------------------------------------------
 
 def run_standard_training(cfg: dict, out_dir: Path):
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("  STANDARD TRAINING")
     print("=" * 60)
 
@@ -149,8 +251,23 @@ def run_standard_training(cfg: dict, out_dir: Path):
     batch_size = cfg.get("per_device_train_batch_size", 4)
     grad_acc   = cfg.get("gradient_accumulation_steps", 4)
 
-    model, tokenizer = build_model(lr=lr, lora_r=lora_r, lora_alpha=lora_alpha)
+    print(f"\n  Hyperparameters:")
+    print(f"    learning_rate          = {lr}")
+    print(f"    lora_r                 = {lora_r}")
+    print(f"    lora_alpha             = {lora_alpha}")
+    print(f"    num_train_epochs       = {epochs}")
+    print(f"    per_device_batch_size  = {batch_size}")
+    print(f"    gradient_accumulation  = {grad_acc}")
+    print(f"    effective_batch_size   = {batch_size * grad_acc}")
+    print(f"    optimizer              = adamw_8bit")
+    print(f"    max_seq_length         = {MAX_SEQ_LEN}")
+    print(f"    model                  = {BASE_MODEL}")
+    print()
+
+    model, tokenizer = build_model(lora_r=lora_r, lora_alpha=lora_alpha)
     datasets         = load_hf_datasets(tokenizer)
+
+    checkpoint_dir = out_dir / "checkpoint_final"
 
     training_args = SFTConfig(
         output_dir=str(out_dir),
@@ -161,10 +278,10 @@ def run_standard_training(cfg: dict, out_dir: Path):
         learning_rate=lr,
         warmup_ratio=0.03,
         lr_scheduler_type="cosine",
-        optim="adamw_8bit",              # Unsloth 8-bit Adam
+        optim="adamw_8bit",
         fp16=not _has_bf16(),
         bf16=_has_bf16(),
-        logging_steps=20,
+        logging_steps=10,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -191,44 +308,69 @@ def run_standard_training(cfg: dict, out_dir: Path):
         response_part=RESP_PART,
     )
 
-    trainer.train()
-    trainer.save_model(str(out_dir / "checkpoint_final"))
-    tokenizer.save_pretrained(str(out_dir / "checkpoint_final"))
-    print(f"\n  Model saved to {out_dir / 'checkpoint_final'}")
+    # ---- TRAIN ----
+    print_gpu_status("BEFORE training")
+    start_time = time.time()
+    train_result = trainer.train()
+    elapsed = time.time() - start_time
+    print(f"\n  Training completed in {elapsed/60:.1f} minutes")
+    print_gpu_status("AFTER training")
+
+    # ---- SAVE MODEL CHECKPOINT (Section 2.2) ----
+    print(f"\n  Saving model checkpoint to {checkpoint_dir} …")
+    trainer.save_model(str(checkpoint_dir))
+    tokenizer.save_pretrained(str(checkpoint_dir))
+
+    # Also save training log
+    log_df = pd.DataFrame(trainer.state.log_history)
+    log_df.to_csv(out_dir / "training_log.csv", index=False)
+    print(f"  Training log saved to {out_dir / 'training_log.csv'}")
+
+    # ---- EVALUATE ON TEST SET (Section 2.2) ----
+    test_results = evaluate_on_test(trainer, datasets, out_dir)
+
+    # ---- SAVE FULL SUMMARY (Section 2.2: document all hyperparameters) ----
+    save_training_summary(cfg, train_result, test_results, out_dir)
+
+    print(f"\n  ✅ Model checkpoint saved to: {checkpoint_dir}")
+
+    return train_result
 
 # ---------------------------------------------------------------------------
 # Optuna HPO
 # ---------------------------------------------------------------------------
 
 def run_hpo(cfg: dict, out_dir: Path):
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("  OPTUNA HYPERPARAMETER SEARCH")
     print("=" * 60)
 
     import optuna
-    from unsloth import FastLanguageModel
 
     n_trials = cfg.get("optuna_trials", 5)
-    epochs   = cfg.get("optuna_epochs", 1)          # 1 epoch per trial to save time
+    epochs   = cfg.get("optuna_epochs", 1)
     batch    = cfg.get("per_device_train_batch_size", 4)
     grad_acc = cfg.get("gradient_accumulation_steps", 4)
 
-    # We need a tokenizer early for dataset preparation
-    # Use default params for tokenizer — it doesn't depend on HPO params
+    # Build tokenizer once (doesn't depend on HPO params)
     _, tokenizer = build_model()
     datasets = load_hf_datasets(tokenizer)
 
-    best_params_store = {}
+    # Free the initial model — we only needed the tokenizer
+    free_vram()
 
     def objective(trial):
         lr         = trial.suggest_float("learning_rate", 5e-5, 3e-4, log=True)
         lora_alpha = trial.suggest_categorical("lora_alpha", [16, 32, 64])
         lora_r     = trial.suggest_categorical("r", [8, 16, 32])
 
+        print(f"\n  --- Trial {trial.number} ---")
+        print(f"      lr={lr:.6f}, r={lora_r}, alpha={lora_alpha}")
+
         trial_dir = out_dir / f"trial_{trial.number}"
         trial_dir.mkdir(parents=True, exist_ok=True)
 
-        model, _ = build_model(lr=lr, lora_r=lora_r, lora_alpha=lora_alpha)
+        model, _ = build_model(lora_r=lora_r, lora_alpha=lora_alpha)
 
         training_args = SFTConfig(
             output_dir=str(trial_dir),
@@ -264,15 +406,15 @@ def run_hpo(cfg: dict, out_dir: Path):
             response_part=RESP_PART,
         )
 
+        # Train 1 epoch for trial
+        trainer.train()
         results = trainer.evaluate()
         f1 = results.get("eval_f1", 0.0)
+        print(f"      Trial {trial.number} → F1 = {f1:.4f}")
 
         # Free VRAM between trials
         del model, trainer
-        import gc
-        import torch
-        gc.collect()
-        torch.cuda.empty_cache()
+        free_vram()
 
         return f1
 
@@ -280,13 +422,31 @@ def run_hpo(cfg: dict, out_dir: Path):
                                 study_name="banking77-intent")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
-    best = study.best_params
-    print("\n  Best params:", best)
-    best_params_store.update(best)
+    # Print Optuna summary
+    print("\n" + "=" * 60)
+    print("  OPTUNA RESULTS")
+    print("=" * 60)
+    print(f"  Best F1:     {study.best_value:.4f}")
+    print(f"  Best params: {study.best_params}")
+
+    # Save Optuna results
+    optuna_results = {
+        "best_value": study.best_value,
+        "best_params": study.best_params,
+        "all_trials": [
+            {"number": t.number, "value": t.value, "params": t.params}
+            for t in study.trials
+        ],
+    }
+    with open(out_dir / "optuna_results.json", "w") as f:
+        json.dump(optuna_results, f, indent=4, default=str)
+
+    # Free VRAM before final training
+    free_vram()
 
     # Final training with best params
-    print("\n  Starting final training with best params …")
-    final_cfg = {**cfg, **best}
+    print("\n  Starting FINAL training with best params …")
+    final_cfg = {**cfg, **study.best_params}
     run_standard_training(final_cfg, out_dir / "best_model")
 
 # ---------------------------------------------------------------------------
@@ -295,7 +455,6 @@ def run_hpo(cfg: dict, out_dir: Path):
 
 def _has_bf16() -> bool:
     try:
-        import torch
         return torch.cuda.is_bf16_supported()
     except Exception:
         return False
@@ -321,10 +480,16 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"  Config:  {args.config}")
+    print(f"  Output:  {out_dir}")
+    print(f"  Mode:    {'OPTUNA HPO + FINAL TRAIN' if args.tune else 'STANDARD TRAIN'}")
+
     if args.tune:
         run_hpo(cfg, out_dir)
     else:
         run_standard_training(cfg, out_dir)
+
+    print("\n  🎉 All done!")
 
 
 if __name__ == "__main__":

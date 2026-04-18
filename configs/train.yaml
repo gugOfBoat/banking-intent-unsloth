@@ -1,18 +1,32 @@
-# Hyperparameters for standard training
-# Used by scripts/train.py when --tune is NOT passed
+# Hyperparameters for fine-tuning (Section 2.2)
+# All parameters documented as required by the project spec
 
-# LoRA
-r: 16
-lora_alpha: 32
+# ---- LoRA Configuration ----
+r: 16                          # LoRA rank (low-rank dimension)
+lora_alpha: 32                 # LoRA scaling factor (alpha / r)
 
-# Training
-learning_rate: 2e-4
-per_device_train_batch_size: 4
-gradient_accumulation_steps: 4    # effective batch = 16
-num_train_epochs: 3
-warmup_ratio: 0.03
-lr_scheduler_type: cosine
+# ---- Training Configuration ----
+learning_rate: 2e-4            # Peak learning rate
+per_device_train_batch_size: 4 # Batch size per GPU
+gradient_accumulation_steps: 4 # Effective batch = 4 × 4 = 16
+num_train_epochs: 3            # Total training epochs
+warmup_ratio: 0.03             # 3% of total steps as linear warmup
+lr_scheduler_type: cosine      # Cosine annealing schedule
 
-# Optuna (only used with --tune)
-optuna_trials: 5
-optuna_epochs: 1
+# ---- Optimizer ----
+# adamw_8bit (set in train.py) — reduces optimizer state VRAM by ~1.5 GB
+
+# ---- Regularization ----
+# lora_dropout: 0.05 (set in train.py)
+# use_rslora: True — Rank-Stabilized LoRA for better convergence
+
+# ---- Sequence Length ----
+# max_seq_length: 512 (set in train.py)
+
+# ---- Quantization ----
+# load_in_4bit: True — NF4 quantization via Unsloth (set in train.py)
+# use_gradient_checkpointing: "unsloth" — extreme VRAM savings (set in train.py)
+
+# ---- Optuna HPO (only used with --tune) ----
+optuna_trials: 5               # Number of HPO trials
+optuna_epochs: 1               # Epochs per trial (fast probing)
