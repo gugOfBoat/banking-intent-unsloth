@@ -1,7 +1,6 @@
 """
 train.py  —  Fine-tune Qwen on BANKING77 intent classification with Unsloth.
 
-Requirements covered (Section 2.2 of project spec):
   - Clearly document all hyperparameters        → configs/train.yaml
   - Save model checkpoint after fine-tuning      → outputs/run/checkpoint_final
   - Evaluate on independent test set             → final test eval after training
@@ -27,7 +26,13 @@ import torch
 import yaml
 from datasets import Dataset, DatasetDict
 from sklearn.metrics import f1_score, accuracy_score, classification_report
-from trl import SFTTrainer, SFTConfig, train_on_responses_only
+from trl import SFTTrainer, SFTConfig
+
+# train_on_responses_only lives in different places depending on trl version
+try:
+    from trl import train_on_responses_only
+except ImportError:
+    from unsloth.chat_templates import train_on_responses_only
 
 # ---------------------------------------------------------------------------
 # Paths
