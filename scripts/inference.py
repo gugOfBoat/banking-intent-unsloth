@@ -138,11 +138,12 @@ class IntentClassification:
         predicted_label : str
             The predicted (fuzzy-matched) intent class name.
         """
-        # Build ChatML prompt
+        # Build ChatML prompt — Qwen3.5 is VL, needs structured content
         messages = [
-            {"role": "user", "content": f"Classify the banking intent: {message}"},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Classify the banking intent: {message}"}
+            ]},
         ]
-        # Use apply_chat_template with return_tensors to bypass VL image processor
         input_ids = self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
             return_tensors="pt",

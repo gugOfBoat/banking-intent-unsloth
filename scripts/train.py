@@ -71,16 +71,14 @@ def free_vram():
 
 
 def backup_to_drive(src_dir, drive_dest="/content/drive/MyDrive/banking-intent-outputs"):
-    """Copy checkpoint/outputs to Google Drive for persistence."""
+    """Copy outputs to Google Drive. Drive must be mounted in notebook BEFORE training."""
     import shutil
-    drive_root = Path("/content/drive")
-    if not drive_root.exists():
-        try:
-            from google.colab import drive
-            drive.mount(str(drive_root))
-        except Exception:
-            print("  [BACKUP] Not on Colab or Drive not available — skipping backup")
-            return
+    mydrive = Path("/content/drive/MyDrive")
+    if not mydrive.exists():
+        print("  [BACKUP] ⚠️  Google Drive not mounted!")
+        print("  [BACKUP] Run this in a notebook cell BEFORE training:")
+        print("  [BACKUP]   from google.colab import drive; drive.mount('/content/drive')")
+        return
     dest = Path(drive_dest)
     dest.mkdir(parents=True, exist_ok=True)
     print(f"  [BACKUP] Copying {src_dir} → {dest} ...")
@@ -189,9 +187,10 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
     correct = 0
 
     for i, row in df.iterrows():
+        # Qwen3.5 is a VL model — must use structured content format
         msgs = [{"role": "user",
-                 "content": f"Classify the banking intent: {row['text']}"}]
-        # Use apply_chat_template with return_tensors to bypass VL image processor
+                 "content": [{"type": "text",
+                              "text": f"Classify the banking intent: {row['text']}"}]}]
         input_ids = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True,
             return_tensors="pt").to(model.device)
