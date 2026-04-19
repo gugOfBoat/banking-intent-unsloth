@@ -138,20 +138,24 @@ class IntentClassification:
         predicted_label : str
             The predicted (fuzzy-matched) intent class name.
         """
-        # Build ChatML prompt — Qwen3.5 is VL, needs structured content
+        # System prompt to constrain output + disable Qwen3.5 thinking mode
+        SYSTEM_MSG = "You are an intent classifier. Reply with ONLY the intent label. No explanation."
         messages = [
+            {"role": "system", "content": [
+                {"type": "text", "text": SYSTEM_MSG}
+            ]},
             {"role": "user", "content": [
                 {"type": "text", "text": f"Classify the banking intent: {message}"}
             ]},
         ]
         input_ids = self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt",
+            return_tensors="pt", enable_thinking=False,
         ).to(self.model.device)
 
         outputs = self.model.generate(
             input_ids=input_ids,
-            max_new_tokens=self.max_new,
+            max_new_tokens=15,
             do_sample=False,
             temperature=1.0,
             use_cache=True,
@@ -161,7 +165,7 @@ class IntentClassification:
         gen_ids = outputs[0][input_ids.shape[1]:]
         raw_output = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
-        # Strip Qwen3.5 <think>...</think> reasoning tags
+        # Strip any residual <think>...</think> tags
         raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL).strip()
 
         # Normalize + fuzzy match

@@ -52,6 +52,9 @@ OUT_DIR = ROOT / "outputs"
 INSTR_PART = "<|im_start|>user\n"
 RESP_PART  = "<|im_start|>assistant\n"
 
+# System prompt to force concise label-only output
+SYSTEM_MSG = "You are an intent classifier. Reply with ONLY the intent label. No explanation."
+
 # ---------------------------------------------------------------------------
 # GPU / VRAM Monitoring
 # ---------------------------------------------------------------------------
@@ -98,6 +101,7 @@ def load_yaml(p):
 
 def _to_messages(row):
     return {"messages": [
+        {"role": "system",    "content": SYSTEM_MSG},
         {"role": "user",      "content": f"Classify the banking intent: {row['text']}"},
         {"role": "assistant", "content": row["intent"]},
     ]}
@@ -187,21 +191,25 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
     correct = 0
 
     for i, row in df.iterrows():
-        # Qwen3.5 is a VL model — must use structured content format
-        msgs = [{"role": "user",
-                 "content": [{"type": "text",
-                              "text": f"Classify the banking intent: {row['text']}"}]}]
+        # Qwen3.5 VL structured content + system prompt + disable thinking
+        msgs = [
+            {"role": "system",
+             "content": [{"type": "text", "text": SYSTEM_MSG}]},
+            {"role": "user",
+             "content": [{"type": "text",
+                          "text": f"Classify the banking intent: {row['text']}"}]},
+        ]
         input_ids = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt").to(model.device)
+            return_tensors="pt", enable_thinking=False).to(model.device)
 
         with torch.no_grad():
-            out = model.generate(input_ids=input_ids, max_new_tokens=32,
+            out = model.generate(input_ids=input_ids, max_new_tokens=15,
                                  do_sample=False, use_cache=True)
 
         gen_ids = out[0][input_ids.shape[1]:]
         raw = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-        # Strip Qwen3.5 <think>...</think> reasoning tags
+        # Strip any residual <think>...</think> tags
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         pred = normalize(raw)
         if valid_labels:
