@@ -117,8 +117,10 @@ def load_datasets(tokenizer):
         df = pd.read_csv(DATA / f"{name}.csv")
         ds = Dataset.from_pandas(df).map(_to_messages)
         def tpl(batch, tok=tokenizer):
+            # enable_thinking=False → MUST match inference template exactly
             return {"text": [tok.apply_chat_template(m, tokenize=False,
-                             add_generation_prompt=False) for m in batch["messages"]]}
+                             add_generation_prompt=False,
+                             enable_thinking=False) for m in batch["messages"]]}
         ds = ds.map(tpl, batched=True, remove_columns=ds.column_names)
         splits[name] = ds
     return DatasetDict({"train": splits["train"],
