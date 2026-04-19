@@ -1,7 +1,7 @@
 # Project 2: Fine-Tuning Intent Detection Model with Banking Dataset
 
 ## Overview
-Fine-tune **Qwen3.5-9B** (4-bit quantized via [Unsloth](https://github.com/unslothai/unsloth)) on the [BANKING77](https://huggingface.co/datasets/PolyAI/banking77) intent classification dataset using LoRA adapters and SFTTrainer.
+Fine-tune **Qwen3.5-4B** (4-bit quantized via [Unsloth](https://github.com/unslothai/unsloth)) on the [BANKING77](https://huggingface.co/datasets/PolyAI/banking77) intent classification dataset using LoRA adapters and SFTTrainer.
 
 ## Project Structure
 ```
@@ -69,7 +69,7 @@ Runs 5 Optuna trials to search over `learning_rate`, `lora_r`, and `lora_alpha`,
 ### Hyperparameters (documented in `configs/train.yaml`)
 | Parameter | Value | Description |
 |---|---|---|
-| Model | `unsloth/Qwen3.5-9B` | Base LLM (4-bit NF4 quantized) |
+| Model | `unsloth/Qwen3.5-4B` | Base LLM (4-bit NF4 quantized) |
 | LoRA rank (`r`) | 16 | Low-rank adapter dimension |
 | LoRA alpha | 32 | Scaling factor |
 | Learning rate | 2e-4 | Peak LR with cosine schedule |
@@ -112,4 +112,4 @@ The final accuracy on the test set is recorded in `outputs/run/test_results.json
 ## References
 - [BANKING77 Dataset](https://huggingface.co/datasets/PolyAI/banking77)
 - [Unsloth Documentation](https://docs.unsloth.ai/)
-- [Qwen Models](https://huggingface.co/unsloth/Qwen3.5-9B)
+- [Qwen Models](https://huggingface.co/unsloth/Qwen3.5-4B)
