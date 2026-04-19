@@ -52,8 +52,13 @@ OUT_DIR = ROOT / "outputs"
 INSTR_PART = "<|im_start|>user\n"
 RESP_PART  = "<|im_start|>assistant\n"
 
-# System prompt to force concise label-only output
-SYSTEM_MSG = "You are an intent classifier. Reply with ONLY the intent label. No explanation."
+# System prompt — teaches label FORMAT, not understanding (model already knows banking)
+SYSTEM_MSG = (
+    "You are a banking intent classifier. "
+    "Reply with ONLY the intent label in snake_case. "
+    "Examples: card_arrival, lost_or_stolen_card, exchange_rate, top_up_failed. "
+    "No explanation, no punctuation, no extra words."
+)
 
 # ---------------------------------------------------------------------------
 # GPU / VRAM Monitoring

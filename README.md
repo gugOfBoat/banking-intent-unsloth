@@ -75,7 +75,7 @@ Runs 5 Optuna trials to search over `learning_rate`, `lora_r`, and `lora_alpha`,
 | Learning rate | 2e-4 | Peak LR with cosine schedule |
 | Batch size | 4 | Per-device batch size |
 | Gradient accumulation | 4 | Effective batch = 16 |
-| Epochs | 3 | Full training epochs |
+| Epochs | 1 | Format-learning only (model already understands intent) |
 | Optimizer | AdamW 8-bit | Memory-efficient optimizer |
 | Max sequence length | 512 | Input token limit |
 | Gradient checkpointing | `"unsloth"` | Extreme VRAM savings |
