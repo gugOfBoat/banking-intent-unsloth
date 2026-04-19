@@ -4,7 +4,7 @@
 # ============================================================
 
 # ---- Model ----
-model_name: "unsloth/Qwen2.5-3B"   # Pure text model (no VL/thinking overhead)
+model_name: "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"  # Instruct = has ChatML template
 max_seq_length: 512
 
 # ---- LoRA ----
