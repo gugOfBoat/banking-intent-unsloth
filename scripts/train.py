@@ -117,10 +117,8 @@ def load_datasets(tokenizer):
         df = pd.read_csv(DATA / f"{name}.csv")
         ds = Dataset.from_pandas(df).map(_to_messages)
         def tpl(batch, tok=tokenizer):
-            # enable_thinking=False → MUST match inference template exactly
             return {"text": [tok.apply_chat_template(m, tokenize=False,
-                             add_generation_prompt=False,
-                             enable_thinking=False) for m in batch["messages"]]}
+                             add_generation_prompt=False) for m in batch["messages"]]}
         ds = ds.map(tpl, batched=True, remove_columns=ds.column_names)
         splits[name] = ds
     return DatasetDict({"train": splits["train"],
@@ -198,17 +196,14 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
     correct = 0
 
     for i, row in df.iterrows():
-        # Qwen3.5 VL structured content + system prompt + disable thinking
+        # Plain text messages (Qwen2.5 is a text model, no VL format needed)
         msgs = [
-            {"role": "system",
-             "content": [{"type": "text", "text": SYSTEM_MSG}]},
-            {"role": "user",
-             "content": [{"type": "text",
-                          "text": f"Classify the banking intent: {row['text']}"}]},
+            {"role": "system",  "content": SYSTEM_MSG},
+            {"role": "user",    "content": f"Classify the banking intent: {row['text']}"},
         ]
         input_ids = tokenizer.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt", enable_thinking=False).to(model.device)
+            return_tensors="pt").to(model.device)
 
         with torch.no_grad():
             out = model.generate(input_ids=input_ids, max_new_tokens=15,
@@ -216,8 +211,6 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
 
         gen_ids = out[0][input_ids.shape[1]:]
         raw = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-        # Strip any residual <think>...</think> tags
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         pred = normalize(raw)
         if valid_labels:
             pred = fuzzy_match(pred, valid_labels)

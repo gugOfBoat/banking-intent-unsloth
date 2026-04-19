@@ -145,17 +145,14 @@ class IntentClassification:
             "Examples: card_arrival, lost_or_stolen_card, exchange_rate, top_up_failed. "
             "No explanation, no punctuation, no extra words."
         )
+        # Plain text messages (Qwen2.5 is a text model, no VL format needed)
         messages = [
-            {"role": "system", "content": [
-                {"type": "text", "text": SYSTEM_MSG}
-            ]},
-            {"role": "user", "content": [
-                {"type": "text", "text": f"Classify the banking intent: {message}"}
-            ]},
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user",   "content": f"Classify the banking intent: {message}"},
         ]
         input_ids = self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt", enable_thinking=False,
+            return_tensors="pt",
         ).to(self.model.device)
 
         outputs = self.model.generate(
@@ -169,9 +166,6 @@ class IntentClassification:
         # Decode only newly generated tokens
         gen_ids = outputs[0][input_ids.shape[1]:]
         raw_output = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-
-        # Strip any residual <think>...</think> tags
-        raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL).strip()
 
         # Normalize + fuzzy match
         normalized = normalize_prediction(raw_output)
