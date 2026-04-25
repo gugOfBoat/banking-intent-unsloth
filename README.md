@@ -172,10 +172,10 @@ Instead of updating all 3.1 Billion parameters (which would require 100+ GB VRAM
 ```python
 model = FastLanguageModel.get_peft_model(
     model,
-    r=16,                                      # Low-rank dimension
+    r=16,                                      # Low-rank dim (Best param from Optuna HPO)
     target_modules=["q_proj","k_proj","v_proj","o_proj",
                      "gate_proj","up_proj","down_proj"],  # 7 target layers
-    lora_alpha=32,                             # Scaling factor (2× rank)
+    lora_alpha=32,                             # Scaling factor (Best param from Optuna HPO)
     lora_dropout=0.05,                         # Regularization
     use_gradient_checkpointing="unsloth",      # Custom VRAM-safe checkpointing
     use_rslora=True,                           # Rank-Stabilized LoRA
