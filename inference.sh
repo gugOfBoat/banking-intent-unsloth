@@ -11,7 +11,7 @@ echo "  BANKING INTENT INFERENCE PIPELINE"
 echo "============================================================"
 
 # Full test set evaluation (accuracy + F1)
-echo "[1/2] Evaluating on hold-out test set (385 samples)..."
+echo "[1/2] Evaluating on hold-out test set ..."
 python scripts/inference.py --eval --config configs/inference.yaml
 
 # Single message demo
