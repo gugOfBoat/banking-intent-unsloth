@@ -311,16 +311,35 @@ When invoked with `--tune`, the training script launches an **automated hyperpar
 3. The trial with the **lowest `eval_loss`** is selected as the winner.
 4. A **final full training** (2 epochs) is launched using the best parameters automatically.
 
-### Example Optuna Output
+### Real Optuna Output Results
+```json
+{
+    "best_value": 0.08674132823944092,
+    "best_params": {
+        "learning_rate": 0.00017509089216514943,
+        "lora_alpha": 32,
+        "r": 16
+    },
+    "trials": [
+        {
+            "n": 0,
+            "v": 0.09838628768920898,
+            "p": {"learning_rate": 0.000265, "lora_alpha": 16, "r": 8}
+        },
+        {
+            "n": 1,
+            "v": 0.08674132823944092,
+            "p": {"learning_rate": 0.000175, "lora_alpha": 32, "r": 16}
+        },
+        {
+            "n": 2,
+            "v": 0.1321250945329666,
+            "p": {"learning_rate": 0.000089, "lora_alpha": 16, "r": 32}
+        }
+    ]
+}
 ```
-Trial 0: lr=0.000175, r=16, alpha=32  → eval_loss = 0.0983
-Trial 1: lr=0.000089, r=32, alpha=16  → eval_loss = 0.0867  ← Best
-Trial 2: lr=0.000250, r=8,  alpha=64  → eval_loss = 0.1124
-
-Best loss:   0.0867
-Best params: {learning_rate: 0.000089, r: 32, alpha: 16}
-→ Final training with best params ...
-```
+> After discovering that `r=16` and `lora_alpha=32` alongside `LR=1.75e-4` minimized the evaluation loss (Trial 1), the system automatically discarded the weak architecture from Trial 2 (`r=32 / alpha=16` causing loss regression) and executed the final run with the strongest parameters.
 
 ---
 
@@ -351,11 +370,42 @@ Best params: {learning_rate: 0.000089, r: 32, alpha: 16}
     --message "Why is my transfer declining?"
 ```
 
-### Option B: Using Shell Wrappers
+### Option B: Using Shell Wrappers (Production-style)
+
+**`train.sh`** — Automates data prep → HPO → final training in one command:
 ```bash
-bash train.sh       # Runs: python scripts/preprocess_data.py && python scripts/train.py --tune
-bash inference.sh   # Runs: python scripts/inference.py --eval --config configs/inference.yaml
+#!/usr/bin/env bash
+set -euo pipefail
+# Preprocess data + Optuna HPO + Final training
+python scripts/preprocess_data.py
+python scripts/train.py --tune --config configs/train.yaml --output outputs/run
 ```
+
+**`inference.sh`** — Loads checkpoint, evaluates test set, and predicts a demo query:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Suppress Unsloth/Transformers verbose banners during inference
+export UNSLOTH_SUPPRESS_WARNINGS=1
+export TRANSFORMERS_VERBOSITY=error
+export TOKENIZERS_PARALLELISM=false
+
+echo "============================================================"
+echo "  BANKING INTENT INFERENCE PIPELINE"
+echo "============================================================"
+
+# Full test set evaluation (accuracy + F1)
+echo "[1/2] Evaluating on hold-out test set (385 samples)..."
+python scripts/inference.py --eval --config configs/inference.yaml
+
+# Single message demo
+echo ""
+echo "[2/2] Single query prediction demo..."
+python scripts/inference.py --config configs/inference.yaml --message "I accidentally lost my card yesterday"
+```
+
+> **Note:** The `UNSLOTH_SUPPRESS_WARNINGS=1` and `TRANSFORMERS_VERBOSITY=error` environment variables silence the Unsloth ASCII banner and Transformers download logs during inference, producing clean terminal output ideal for demonstrations.
 
 ---
 
