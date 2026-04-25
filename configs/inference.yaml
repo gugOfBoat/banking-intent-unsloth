@@ -1,4 +1,4 @@
 # Inference config — Config-Driven Development
-model_checkpoint: "outputs/run/best_model/checkpoint_final"
+model_checkpoint: "outputs/run/checkpoint_final"
 max_new_tokens: 32
 label_map: "sample_data/label_map.json"   # for fuzzy-matching predictions
