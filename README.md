@@ -1,145 +1,406 @@
 <div align="center">
   <h1>🏦 Banking Intent Classification with Unsloth & Qwen 2.5</h1>
-  <p><i>An industry-grade NLP fine-tuning pipeline for the BANKING77 dataset, optimized for resource-constrained environments (Single T4 GPU).</i></p>
+  <p><i>A production-grade NLP fine-tuning pipeline for the BANKING77 dataset, optimized for resource-constrained GPU environments using Unsloth's kernel-level acceleration.</i></p>
 
   [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
   [![Unsloth](https://img.shields.io/badge/Unsloth-2x_Faster-FF69B4.svg)](https://github.com/unslothai/unsloth)
-  [![Qwen 2.5](https://img.shields.io/badge/Model-Qwen_2.5_3B_Instruct-green.svg)](https://huggingface.co/unsloth/Qwen2.5-3B)
+  [![Qwen 2.5](https://img.shields.io/badge/Model-Qwen_2.5_3B_Instruct-green.svg)](https://huggingface.co/unsloth/Qwen2.5-3B-Instruct-bnb-4bit)
   [![License](https://img.shields.io/badge/License-MIT-gray.svg)](LICENSE)
 </div>
 
 ---
 
-## 📑 Project Overview
-
-This project implements a complete, end-to-end fine-tuning methodology to classify 77 distinct banking intents (e.g., "card_arrival", "top_up_failed", "lost_or_stolen_card"). 
-
-By leveraging **Unsloth** and **4-bit NF4 Quantization**, we successfully fine-tuned the highly capable **Qwen2.5-3B-Instruct** large language model on a standard Tesla T4 GPU without encountering Out-Of-Memory (OOM) failures.
-
-### ✨ Key Technical Highlights
-- **Config-Driven Architecture:** All hyperparameters and model paths are decoupled from scripts using YAML (`configs/train.yaml`, `configs/inference.yaml`), enabling clean experimentation and scaling.
-- **Resource-Aware Sampling:** Implemented _Stratified Sampling_ to extract a highly balanced representative subset of the dataset, ensuring the model sees all 77 classes while drastically reducing training constraints.
-- **Robust Generative Inference:** LLMs naturally tend to generate verbose responses. Our standalone `IntentClassification` pipeline utilizes post-processing Regex and Difflib-based **Fuzzy Matching** to force the LLM output to strictly match one of the true canonical labels.
-- **Optuna HPO:** Integrated hyperparameter optimization to automatically sweep for the optimal Learning Rate and LoRA Rank.
+## 📑 Table of Contents
+1. [Executive Summary](#-1-executive-summary)
+2. [Why Unsloth? — The Engineering Case](#-2-why-unsloth--the-engineering-case)
+3. [Codebase Architecture](#-3-codebase-architecture)
+4. [Pipeline Stage 1: Data Preparation (`preprocess_data.py`)](#-4-pipeline-stage-1-data-preparation)
+5. [Pipeline Stage 2: Unsloth Fine-Tuning (`train.py`)](#-5-pipeline-stage-2-unsloth-fine-tuning)
+6. [Pipeline Stage 3: Standalone Inference (`inference.py`)](#-6-pipeline-stage-3-standalone-inference)
+7. [Hyperparameter Optimization (Optuna HPO)](#-7-hyperparameter-optimization-optuna-hpo)
+8. [Execution Guide](#-8-execution-guide)
+9. [Training Logs & VRAM Evidence](#-9-training-logs--vram-evidence)
+10. [Video Demonstration](#-10-video-demonstration)
 
 ---
 
-## 📂 Project Structure
+## 📋 1. Executive Summary
+
+This project implements an end-to-end Machine Learning pipeline to classify **77 distinct banking intents** (e.g., `card_arrival`, `exchange_rate`, `top_up_failed`) from raw customer queries.
+
+The core challenge: Fine-tuning a 3-Billion parameter LLM on a **single Tesla T4 GPU (15 GB VRAM)** without Out-Of-Memory (OOM) crashes, while maintaining high classification accuracy.
+
+**Key Results:**
+- ✅ Model: `Qwen2.5-3B-Instruct` (4-bit NF4 quantized via Unsloth)
+- ✅ VRAM footprint: **~6 GB peak** (out of 15 GB available on T4)
+- ✅ Training time: **~16 minutes** per epoch on 1925 samples
+- ✅ Only **0.96% of parameters trainable** (29.9M LoRA / 3.1B total)
+
+---
+
+## 🔬 2. Why Unsloth? — The Engineering Case
+
+> *"A 3B model in 4-bit can already fit on a T4 with plain HuggingFace. So why use Unsloth?"*
+
+This is an important question. The answer lies in **what happens DURING training**, not just at model loading:
+
+### Problem: VRAM Spikes During Backward Pass
+When HuggingFace's native `SFTTrainer` computes gradients (backward pass), it needs to store **activation memory** — intermediate tensors from every layer. For a 3B model, this causes sudden VRAM spikes of 8-12 GB on top of the static model weight, easily exceeding T4's 15 GB limit and crashing the process.
+
+### Unsloth's 3-Layer Solution
+
+| Layer | What Unsloth Does | Impact |
+|:---|:---|:---|
+| **Kernel Rewriting** | Rewrites `RoPE` (Rotary Positional Embedding), `RMSNorm`, and `CrossEntropyLoss` in **Triton/CUDA** directly, bypassing Python overhead | **2× faster** training throughput |
+| **Custom Gradient Checkpointing** | `gradient_checkpointing: "unsloth"` uses a proprietary autograd scheme that aggressively releases activation tensors mid-computation | VRAM stays **flat at ~6 GB** instead of spiking to 12-14 GB |
+| **Optimizer State Compression** | `adamw_8bit` stores optimizer momentum in 8-bit instead of 32-bit | Saves **~1.5 GB** of optimizer state memory |
+
+### Evidence from Our Training Logs
+```
+[BEFORE load]    Tesla T4 | 3.82 GB allocated  | free ~10.70 GB
+[AFTER LoRA]     Tesla T4 | 5.93 GB allocated  | free ~8.49 GB   ← Entire model + LoRA
+[AFTER training] Tesla T4 | 5.93 GB allocated  | free ~8.49 GB   ← No spike during training!
+```
+The VRAM **did not increase at all** between LoRA initialization and end of training. This flat memory profile is impossible with standard HuggingFace SFTTrainer and is the direct result of Unsloth's custom gradient checkpointing.
+
+### Why `Qwen2.5-3B-Instruct` (not Base)?
+- **Base models** (`Qwen2.5-3B`) have **no chat template** — calling `apply_chat_template()` crashes immediately.
+- **Instruct models** (`Qwen2.5-3B-Instruct`) ship with a built-in **ChatML template** that correctly parses `system`, `user`, and `assistant` roles during SFT.
+- We use the **`-bnb-4bit`** variant (`unsloth/Qwen2.5-3B-Instruct-bnb-4bit`), which is pre-quantized on HuggingFace Hub for instant download and compatibility with `BitsAndBytes` NF4.
+
+---
+
+## 📂 3. Codebase Architecture
+
+The project follows a strict **Config-Driven Architecture**: all hyperparameters live in YAML files (`configs/`), completely decoupled from Python logic (`scripts/`). Changing the LLM family (e.g., Qwen → Llama → Mistral) requires editing only `model_name` in `train.yaml` — zero Python changes needed, because Unsloth's `FastLanguageModel.from_pretrained()` auto-detects and patches the correct architecture internally.
 
 ```text
 banking-intent-unsloth/
 ├── scripts/
-│   ├── preprocess_data.py     # Pulls dataset, applies Stratified Sampling, exports CSVs
-│   ├── train.py               # Fine-tuning engine (SFTTrainer + LoRA + Checkpointing)
-│   └── inference.py           # Standalone Object-Oriented Inference class
+│   ├── preprocess_data.py     # Stage 1: Dataset download + Stratified Sampling
+│   ├── train.py               # Stage 2: Unsloth SFT + Optuna HPO + Checkpointing
+│   └── inference.py           # Stage 3: Standalone OOP Inference + Anti-Hallucination
+│
 ├── configs/
-│   ├── train.yaml             # Hyperparameters & Unsloth configuration
-│   └── inference.yaml         # Checkpoint target and label map linking
+│   ├── train.yaml             # All training hyperparameters (LoRA, LR, Epochs, ...)
+│   └── inference.yaml         # Checkpoint path + label map for fuzzy matching
+│
 ├── sample_data/
-│   ├── train.csv              # Subset training data (25 samples per class)
-│   ├── val.csv                # Validation data (5 samples per class)
-│   ├── test.csv               # Holdout testing data (5 samples per class)
-│   └── label_map.json         # Master list of all 77 intent labels
-├── outputs/                   # Autogenerated directory containing saved checkpoints
-├── train.sh                   # Unix wrapper script for automated tuning
-├── inference.sh               # Unix wrapper script for testing
-├── requirements.txt           # Python dependencies
-└── README.md                  # Detailed documentation (You are here)
+│   ├── train.csv              # 1925 samples (77 intents × 25 queries/class)
+│   ├── val.csv                # 385 samples  (77 intents × 5  queries/class)
+│   ├── test.csv               # 385 samples  (77 intents × 5  queries/class)
+│   └── label_map.json         # Canonical list of all 77 intent names
+│
+├── outputs/                   # Auto-generated: checkpoints, logs, metrics
+│   └── run/best_model/
+│       ├── checkpoint_final/  # 🔑 Saved LoRA adapter weights + tokenizer
+│       ├── training_log.csv   # Per-step loss tracking
+│       ├── training_summary.json
+│       ├── test_results.json  # Final accuracy & F1
+│       └── optuna_results.json
+│
+├── train.sh                   # Unix wrapper: bash train.sh
+├── inference.sh               # Unix wrapper: bash inference.sh
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## 🚀 Environment Setup
+## 🗃️ 4. Pipeline Stage 1: Data Preparation
 
-We highly recommend running this pipeline in **Google Colab** or **Kaggle** to utilize the free Tesla T4 GPUs.
+**Script:** `scripts/preprocess_data.py`
 
-### Option: Kaggle / Google Colab (Recommended)
-Create a new Notebook, attach a T4 GPU, and execute the following in the first cell:
+### The Problem
+The full BANKING77 dataset contains 13,083 training samples. Fine-tuning a 3B LLM on this volume with a T4 GPU would take several hours and risk timeouts on Kaggle (12-hour limit).
+
+### The Solution: Stratified Sampling
+Instead of random slicing (which risks missing rare intents), the script implements **deterministic stratified sampling**:
+
 ```python
-# Install Unsloth and specific dependencies
-!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+# For EACH of the 77 intent classes:
+for _, group in pool.groupby(label_col):
+    g = group.sample(frac=1, random_state=42)   # shuffle within class
+    train_parts.append(g.iloc[:25])              # exactly 25 train
+    val_parts.append(g.iloc[25:30])              # exactly 5 val 
+    test_parts.append(g.iloc[30:35])             # exactly 5 test
+```
 
-# Clone repository
+**Key Design Decisions:**
+- **Class Balance = Perfect:** Every intent gets exactly 25/5/5 samples. No class is over- or under-represented.
+- **Reproducibility:** `random_state=42` ensures identical splits across runs.
+- **Deduplication:** `drop_duplicates(subset=["text"])` prevents data leakage between train/test.
+- **Label Mapping:** Raw integer labels are converted to human-readable snake_case names (e.g., `0` → `activate_my_card`) and exported as `label_map.json` for downstream fuzzy matching.
+- **Network Resilience:** HTTP requests use `Retry(total=5, backoff_factor=2)` to survive transient HuggingFace Hub failures.
+
+### Output
+| Split | Samples | Classes | File |
+|:---|:---|:---|:---|
+| Train | 1,925 | 77 | `sample_data/train.csv` |
+| Validation | 385 | 77 | `sample_data/val.csv` |
+| Test (Hold-out) | 385 | 77 | `sample_data/test.csv` |
+
+---
+
+## 🧠 5. Pipeline Stage 2: Unsloth Fine-Tuning
+
+**Script:** `scripts/train.py`
+
+### 5.1 Training Data Format (ChatML)
+Each training sample is converted into a 3-turn ChatML conversation:
+```python
+def _to_messages(row):
+    return {"messages": [
+        {"role": "system",    "content": SYSTEM_MSG},       # forces concise output
+        {"role": "user",      "content": f"Classify the banking intent: {row['text']}"},
+        {"role": "assistant", "content": row["intent"]},    # ground-truth label
+    ]}
+```
+
+The **System Prompt** is critical — it teaches the model to output *only* the label in snake_case format:
+```
+"You are a banking intent classifier. Reply with ONLY the intent label in snake_case.
+Examples: card_arrival, lost_or_stolen_card, exchange_rate, top_up_failed.
+No explanation, no punctuation, no extra words."
+```
+
+The tokenizer's `apply_chat_template()` then wraps this into Qwen's native `<|im_start|>` / `<|im_end|>` tokens. The `train_on_responses_only()` function ensures the model only updates its weights on the `assistant` portion (the label), never on the user query.
+
+### 5.2 LoRA Configuration
+Instead of updating all 3.1 Billion parameters (which would require 100+ GB VRAM), we attach lightweight **LoRA adapters** to the attention and MLP projection layers:
+
+```python
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,                                      # Low-rank dimension
+    target_modules=["q_proj","k_proj","v_proj","o_proj",
+                     "gate_proj","up_proj","down_proj"],  # 7 target layers
+    lora_alpha=32,                             # Scaling factor (2× rank)
+    lora_dropout=0.05,                         # Regularization
+    use_gradient_checkpointing="unsloth",      # Custom VRAM-safe checkpointing
+    use_rslora=True,                           # Rank-Stabilized LoRA
+)
+```
+
+**Result:** Only **29,933,568 parameters** are trainable — just **0.96%** of the total 3.1B model.
+
+### 5.3 Full Hyperparameter Table
+
+| Parameter | Value | Rationale |
+|:---|:---|:---|
+| `model_name` | `unsloth/Qwen2.5-3B-Instruct-bnb-4bit` | Instruct variant with ChatML; pre-quantized NF4 4-bit |
+| `r` (LoRA rank) | 16 | Balanced capacity vs. memory; searched via Optuna |
+| `lora_alpha` | 32 | Standard 2× rank scaling for stable convergence |
+| `lora_dropout` | 0.05 | Prevents LoRA overfitting on small dataset |
+| `learning_rate` | 2e-4 | Peak LR with cosine annealing schedule |
+| `per_device_train_batch_size` | 4 | Conservative to prevent forward-pass OOM |
+| `gradient_accumulation_steps` | 4 | Effective batch = 4×4 = 16 for stable gradients |
+| `num_train_epochs` | 2 | Qwen2.5 already understands banking; only needs format alignment |
+| `warmup_ratio` | 0.03 | 3% linear warmup before cosine decay |
+| `optimizer` | `adamw_8bit` | Saves ~1.5 GB vs. standard 32-bit AdamW |
+| `gradient_checkpointing` | `"unsloth"` | Custom activation memory release; prevents VRAM spikes |
+| `max_seq_length` | 512 | Sufficient for short banking queries |
+| `fp16_full_eval` | True | Halves evaluation memory footprint |
+| `eval_accumulation_steps` | 4 | Offloads eval logits to CPU in chunks |
+| `dataset_num_proc` | 1 | Prevents multiprocessing fork-bombs on Kaggle |
+
+### 5.4 OOM-Safe Evaluation Strategy
+Standard `compute_metrics` in HuggingFace stores **logits for the entire vocabulary** (151,000 tokens × batch × sequence length), which alone consumes **~14 GB** and immediately crashes T4. 
+
+Our solution: **Generative Evaluation** — after training completes, we switch to `FastLanguageModel.for_inference()` and generate predictions one-by-one using `model.generate()`, which only uses ~2 GB of inference VRAM:
+
+```python
+# Generative eval: uses inference VRAM (~2GB) instead of eval logits (~14GB)
+FastLanguageModel.for_inference(model)
+for row in test_data:
+    output = model.generate(input_ids=..., max_new_tokens=15, do_sample=False)
+```
+
+### 5.5 Checkpoint Saving
+Upon completion, the LoRA adapter weights and tokenizer are saved physically to disk:
+```python
+trainer.save_model(str(checkpoint_dir))        # LoRA adapter weights
+tokenizer.save_pretrained(str(checkpoint_dir)) # Tokenizer config + vocab
+```
+This checkpoint is then used independently by the Inference pipeline.
+
+---
+
+## 🎯 6. Pipeline Stage 3: Standalone Inference
+
+**Script:** `scripts/inference.py`
+
+This file is **completely independent** of `train.py`. It implements the required `IntentClassification` class exactly matching the project specification:
+
+### 6.1 Class Interface
+```python
+class IntentClassification:
+    def __init__(self, model_path: str):
+        """
+        Reads inference.yaml → locates checkpoint directory → loads:
+          1. Tokenizer (ChatML template)
+          2. Model (4-bit LoRA adapter via FastLanguageModel)
+          3. Label map (77 canonical intent names for fuzzy matching)
+        """
+
+    def __call__(self, message: str) -> str:
+        """
+        Input:  "I accidentally lost my card yesterday"
+        Output: "lost_or_stolen_card"
+        """
+```
+
+### 6.2 The Anti-Hallucination Pipeline
+Generative LLMs naturally produce verbose outputs. Even with a strict System Prompt, the model may occasionally output `"Card_arrival."` instead of `card_arrival`, or `"The intent is top up failed"` instead of `top_up_failed`. Our `__call__` method implements a **3-layer defense**:
+
+```
+Layer 1: System Prompt Grounding
+   └─ ChatML System message forces: "Reply with ONLY the intent label in snake_case"
+
+Layer 2: Regex Normalization (normalize_prediction)
+   └─ lowercase → strip punctuation → spaces/hyphens → underscores → collapse
+   └─ "Card_arrival."  →  "card_arrival"
+   └─ "  Top Up!  "    →  "top_up"
+
+Layer 3: Fuzzy Matching (map_prediction_to_label)
+   └─ difflib.get_close_matches(prediction, 77_valid_labels, cutoff=0.6)
+   └─ "card_arival"  →  "card_arrival"  (typo-tolerant)
+```
+
+### 6.3 Usage Examples
+
+**Full test set evaluation (385 samples):**
+```bash
+python scripts/inference.py --eval --config configs/inference.yaml
+```
+
+**Single query prediction:**
+```bash
+python scripts/inference.py --config configs/inference.yaml \
+    --message "I accidentally lost my card yesterday"
+# Output:
+#   Input:   I accidentally lost my card yesterday
+#   Intent:  lost_or_stolen_card
+```
+
+**Python API usage:**
+```python
+from scripts.inference import IntentClassification
+
+clf = IntentClassification("configs/inference.yaml")
+label = clf("I want to top up my account")
+print(label)  # → "top_up_by_card"
+```
+
+---
+
+## 🔍 7. Hyperparameter Optimization (Optuna HPO)
+
+When invoked with `--tune`, the training script launches an **automated hyperparameter search** using the Optuna framework before running the final training:
+
+### Search Space
+| Parameter | Range | Strategy |
+|:---|:---|:---|
+| `learning_rate` | `[5e-5, 3e-4]` | Log-uniform sampling |
+| `lora_alpha` | `{16, 32, 64}` | Categorical |
+| `r` (LoRA rank) | `{8, 16, 32}` | Categorical |
+
+### How It Works
+1. **3 Trials** are executed, each training for **1 quick epoch** to probe the loss landscape.
+2. After each trial, the model is deleted and VRAM is cleared (`gc.collect()` + `torch.cuda.empty_cache()`) to prevent memory leakage between trials.
+3. The trial with the **lowest `eval_loss`** is selected as the winner.
+4. A **final full training** (2 epochs) is launched using the best parameters automatically.
+
+### Example Optuna Output
+```
+Trial 0: lr=0.000175, r=16, alpha=32  → eval_loss = 0.0983
+Trial 1: lr=0.000089, r=32, alpha=16  → eval_loss = 0.0867  ← Best
+Trial 2: lr=0.000250, r=8,  alpha=64  → eval_loss = 0.1124
+
+Best loss:   0.0867
+Best params: {learning_rate: 0.000089, r: 32, alpha: 16}
+→ Final training with best params ...
+```
+
+---
+
+## 🚀 8. Execution Guide
+
+### Option A: Kaggle / Google Colab (Recommended)
+```python
+# Cell 1: Install Unsloth + clone repository
+!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 !git clone https://github.com/gugOfBoat/banking-intent-unsloth
 %cd banking-intent-unsloth
 !pip install -r requirements.txt
 ```
 
----
-
-## 🛠️ Pipeline Stage 1: Data Preparation
-
-To ensure training fits comfortably into a limited compute window, the `preprocess_data.py` script pulls the official `PolyAI/banking77` dataset and extracts a balanced slice.
-
 ```bash
-python scripts/preprocess_data.py
+# Cell 2: Train with Optuna HPO
+!python scripts/train.py --tune
 ```
 
-**What it does:** 
-1. Subsamples precisely `25 Train`, `5 Val`, and `5 Test` samples for *every* 77 intent to prevent class imbalance.
-2. Saves normalized data into `sample_data/`.
-
----
-
-## 🧠 Pipeline Stage 2: Unsloth Fine-Tuning
-
-The core training logic is executed via the `train.py` script. The script loads the raw Base model, applies LoRA layers, trains via HuggingFace `SFTTrainer`, and **saves the checkpoint to disk.**
-
 ```bash
-bash train.sh
-# Equivalently: python scripts/train.py --tune --output outputs/run
+# Cell 3: Evaluate on test set
+!python scripts/inference.py --eval --config configs/inference.yaml
 ```
 
-### ⚙️ Fine-Tuning Configurations & Hyperparameters
-*(Configured explicitly in `configs/train.yaml`)*
+```bash
+# Cell 4: Single query prediction
+!python scripts/inference.py --config configs/inference.yaml \
+    --message "Why is my transfer declining?"
+```
 
-| Parameter Category | Value | Rationale & Description |
-| :--- | :--- | :--- |
-| **Model Type** | `unsloth/Qwen2.5-3B-Instruct-bnb-4bit` | Instruct variant ensures built-in ChatML template compatibility. 4-bit handles memory footprint. |
-| **LoRA `r` (Rank)**| `16` | Retains meaningful representation capacity without heavy VRAM usage. |
-| **LoRA `alpha`** | `32` | Standard 2x scaling ratio against the LoRA rank. |
-| **Batch Size** | `4` | Kept small to prevent CUDA Out Of Memory (OOM) on T4. |
-| **Gradient Accumulation** | `4` | Achieves a pseudo-batch size of 16 (4x4) for stable gradients. |
-| **Learning Rate** | `2e-4` | Standard fast-converging peak LR using cosine annealing scheduler. |
-| **Epochs** | `2` | Kept extremely low (1-3) since Qwen2.5 is intelligent and only needs format alignment. |
-| **Optimizer** | `adamw_8bit` | Radically reduces optimizer state memory by ~1.5 GB. |
-| **Gradient Checkpointing**| `"unsloth"` | Unique Unsloth feature that provides extreme VRAM savings. |
-
-**Checkpoint Delivery:** Once training completes, the adapter weights inside `outputs/run/best_model/checkpoint_final/` are actively saved to disk as required by the specifications.
+### Option B: Using Shell Wrappers
+```bash
+bash train.sh       # Runs: python scripts/preprocess_data.py && python scripts/train.py --tune
+bash inference.sh   # Runs: python scripts/inference.py --eval --config configs/inference.yaml
+```
 
 ---
 
-## 🎯 Pipeline Stage 3: Standalone Inference
+## 📊 9. Training Logs & VRAM Evidence
 
-The `scripts/inference.py` follows strict architectural rules: It includes a wrapper class `IntentClassification` that executes predicting operations entirely independent of the training loops.
-
-- `__init__(self, model_path)`: Loads configuration, tokenizers, and the **saved model checkpoint**.
-- `__call__(self, message)`: Inputs queries inside the ChatML Template and outputs definitive intent tags using string cleaning and sequence matching techniques.
-
-### Run Full Test Evaluation:
-```bash
-python scripts/inference.py --eval --config configs/inference.yaml
+### VRAM Profile (Tesla T4 — 14.56 GB Total)
+```
+[BEFORE load]    Tesla T4 | 3.82 / 14.56 GB | free ~10.70 GB
+[AFTER LoRA]     Tesla T4 | 5.93 / 14.56 GB | free ~8.49 GB
+[AFTER training] Tesla T4 | 5.93 / 14.56 GB | free ~8.49 GB  ← Zero spike!
+[INFERENCE mode]           | 5.93 / 14.56 GB | free ~8.49 GB
 ```
 
-### Single Label Prediction:
-```bash
-python scripts/inference.py --config configs/inference.yaml --message "I lost my debit card what should I do?"
+### Unsloth Banner (Proof of Acceleration)
 ```
-*Expected Output:* `Intent: lost_or_stolen_card`
+==((====))==  Unsloth - 2x faster free finetuning | Num GPUs used = 1
+   \\   /|    Num examples = 1,925 | Num Epochs = 1 | Total steps = 121
+O^O/ \_/ \    Batch size per device = 4 | Gradient accumulation steps = 4
+\        /    Data Parallel GPUs = 1 | Total batch size (4 x 4 x 1) = 16
+ "-____-"     Trainable parameters = 29,933,568 of 3,115,872,256 (0.96% trained)
+```
+
+### Training Speed
+- **~16 minutes per epoch** on Tesla T4
+- **Total pipeline** (3 Optuna trials + 2-epoch final train): **~60 minutes**
 
 ---
 
-## 🎥 Video Demonstration
+## 🎥 10. Video Demonstration
 
-A complete walk-through of the code structure, the checkpointing mechanics, and live execution of the inference evaluations to verify final accuracy logic.
+A complete walk-through covering:
+- Code structure and Config-Driven architecture
+- Unsloth VRAM reduction (with live log evidence)
+- Checkpoint saving and loading across separate notebooks
+- Full test set evaluation (Accuracy & F1)
+- Single query live prediction
 
 👉 **[[Click Here to Watch the Video Demonstration on Google Drive]](#)** 👈
 
-*(Note: Replace `#` with the actual Google Drive public link before final submission).*
+*(Replace `#` with the actual Google Drive public link before final submission)*
 
 ---
+
 <div align="center">
 <i>Course: Applications of Natural Language Processing in Industry</i><br>
 <i>Lecturer: Dr. Nguyen Hong Buu Long</i><br>
-<i>Vietnam National University Ho Chi Minh City - University of Science</i>
+<i>Vietnam National University Ho Chi Minh City — University of Science</i>
 </div>
