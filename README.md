@@ -33,8 +33,9 @@ The core challenge: Fine-tuning a 3-Billion parameter LLM on a **single Tesla T4
 **Key Results:**
 - ✅ Model: `Qwen2.5-3B-Instruct` (4-bit NF4 quantized via Unsloth)
 - ✅ VRAM footprint: **~6 GB peak** (out of 15 GB available on T4)
-- ✅ Training time: **~16 minutes** per epoch on 1925 samples
+- ✅ Training: **5 epochs** on full 11,543-sample dataset
 - ✅ Only **0.96% of parameters trainable** (29.9M LoRA / 3.1B total)
+- ✅ Hyperparameters pre-optimized via **Optuna HPO** (3 trials on subset)
 
 ---
 
@@ -86,9 +87,9 @@ banking-intent-unsloth/
 │   └── inference.yaml         # Checkpoint path + label map for fuzzy matching
 │
 ├── sample_data/
-│   ├── train.csv              # 1925 samples (77 intents × 25 queries/class)
-│   ├── val.csv                # 385 samples  (77 intents × 5  queries/class)
-│   ├── test.csv               # 385 samples  (77 intents × 5  queries/class)
+│   ├── train.csv              # (11,543 samples: full training set, all 77 classes)
+│   ├── val.csv                # (770 samples: 77 intents × 10 queries/class)
+│   ├── test.csv               # (770 samples: 77 intents × 10 queries/class)
 │   └── label_map.json         # Canonical list of all 77 intent names
 │
 ├── outputs/                   # Auto-generated: checkpoints, logs, metrics
@@ -111,23 +112,21 @@ banking-intent-unsloth/
 
 **Script:** `scripts/preprocess_data.py`
 
-### The Problem
-The full BANKING77 dataset contains 13,083 training samples. Fine-tuning a 3B LLM on this volume with a T4 GPU would take several hours and risk timeouts on Kaggle (12-hour limit).
-
-### The Solution: Stratified Sampling
-Instead of random slicing (which risks missing rare intents), the script implements **deterministic stratified sampling**:
+### Strategy: Full Dataset with Stratified Holdout
+The script downloads the complete BANKING77 dataset (~13,000 samples), pools all splits, deduplicates, and applies a **stratified holdout** split:
 
 ```python
 # For EACH of the 77 intent classes:
 for _, group in pool.groupby(label_col):
     g = group.sample(frac=1, random_state=42)   # shuffle within class
-    train_parts.append(g.iloc[:25])              # exactly 25 train
-    val_parts.append(g.iloc[25:30])              # exactly 5 val 
-    test_parts.append(g.iloc[30:35])             # exactly 5 test
+    val_parts.append(g.iloc[:10])                # 10 val holdout
+    test_parts.append(g.iloc[10:20])             # 10 test holdout
+    train_parts.append(g.iloc[20:])              # ALL REMAINING → train
 ```
 
 **Key Design Decisions:**
-- **Class Balance = Perfect:** Every intent gets exactly 25/5/5 samples. No class is over- or under-represented.
+- **Maximum Training Data:** Instead of sampling a tiny subset, we use **all available data** for training (~150 samples/class), reserving only 10 val + 10 test per class as holdout.
+- **Class Balance = Perfect:** Every intent gets exactly 10/10 holdout samples. No class is over- or under-represented.
 - **Reproducibility:** `random_state=42` ensures identical splits across runs.
 - **Deduplication:** `drop_duplicates(subset=["text"])` prevents data leakage between train/test.
 - **Label Mapping:** Raw integer labels are converted to human-readable snake_case names (e.g., `0` → `activate_my_card`) and exported as `label_map.json` for downstream fuzzy matching.
@@ -136,9 +135,9 @@ for _, group in pool.groupby(label_col):
 ### Output
 | Split | Samples | Classes | File |
 |:---|:---|:---|:---|
-| Train | 1,925 | 77 | `sample_data/train.csv` |
-| Validation | 385 | 77 | `sample_data/val.csv` |
-| Test (Hold-out) | 385 | 77 | `sample_data/test.csv` |
+| Train (Full) | 11,543 | 77 | `sample_data/train.csv` |
+| Validation | 770 | 77 | `sample_data/val.csv` |
+| Test (Hold-out) | 770 | 77 | `sample_data/test.csv` |
 
 ---
 
@@ -192,10 +191,10 @@ model = FastLanguageModel.get_peft_model(
 | `r` (LoRA rank) | 16 | Balanced capacity vs. memory; searched via Optuna |
 | `lora_alpha` | 32 | Standard 2× rank scaling for stable convergence |
 | `lora_dropout` | 0.05 | Prevents LoRA overfitting on small dataset |
-| `learning_rate` | 2e-4 | Peak LR with cosine annealing schedule |
-| `per_device_train_batch_size` | 4 | Conservative to prevent forward-pass OOM |
-| `gradient_accumulation_steps` | 4 | Effective batch = 4×4 = 16 for stable gradients |
-| `num_train_epochs` | 2 | Qwen2.5 already understands banking; only needs format alignment |
+| `learning_rate` | `1.75e-4` | **Optimized by Optuna HPO** (best of 3 trials on subset) |
+| `per_device_train_batch_size` | `8` | Larger batch for full dataset throughput |
+| `gradient_accumulation_steps` | `2` | Effective batch = 8×2 = 16 for stable gradients |
+| `num_train_epochs` | `5` | Full convergence on complete 11,543-sample dataset |
 | `warmup_ratio` | 0.03 | 3% linear warmup before cosine decay |
 | `optimizer` | `adamw_8bit` | Saves ~1.5 GB vs. standard 32-bit AdamW |
 | `gradient_checkpointing` | `"unsloth"` | Custom activation memory release; prevents VRAM spikes |

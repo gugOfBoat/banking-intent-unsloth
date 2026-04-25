@@ -2,22 +2,26 @@
 # Training Configuration (Config-Driven Development)
 # All parameters read by scripts/train.py — no hardcoding
 # ============================================================
+# Best hyperparameters discovered via Optuna HPO on subset:
+#   Trial 1 → eval_loss = 0.0867 (best of 3 trials)
+#   learning_rate: 1.75e-4, lora_alpha: 32, r: 16
+# ============================================================
 
 # ---- Model ----
 model_name: "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"  # Instruct = has ChatML template
 max_seq_length: 512
 
-# ---- LoRA ----
-r: 16                          # LoRA rank (low-rank dimension)
-lora_alpha: 32                 # LoRA scaling factor
+# ---- LoRA (Optimized by Optuna HPO) ----
+r: 16                          # Best from HPO Trial 1 (beat r=8 and r=32)
+lora_alpha: 32                 # Best from HPO Trial 1
 lora_dropout: 0.05             # Dropout on LoRA layers
 use_rslora: true               # Rank-Stabilized LoRA
 
-# ---- Training ----
-learning_rate: 2e-4            # Peak learning rate
-per_device_train_batch_size: 4 # Batch size per GPU
-gradient_accumulation_steps: 4 # Effective batch = 4 × 4 = 16
-num_train_epochs: 2            # 2 epochs with Optuna tuning
+# ---- Training (Full Dataset) ----
+learning_rate: 1.75e-4         # Best from HPO Trial 1 (beat 2.65e-4 and 8.9e-5)
+per_device_train_batch_size: 8 # Larger batch for full dataset throughput
+gradient_accumulation_steps: 2 # Effective batch = 8 × 2 = 16
+num_train_epochs: 5            # Full convergence on complete dataset
 warmup_ratio: 0.03             # Linear warmup fraction
 lr_scheduler_type: cosine      # Cosine annealing schedule
 optimizer: adamw_8bit          # 8-bit Adam (saves ~1.5 GB VRAM)
@@ -26,6 +30,5 @@ optimizer: adamw_8bit          # 8-bit Adam (saves ~1.5 GB VRAM)
 load_in_4bit: true             # BitsAndBytes NF4 quantization
 gradient_checkpointing: "unsloth"  # Extreme VRAM savings
 
-# ---- Optuna HPO (only with --tune) ----
-optuna_trials: 3               # Search LR + LoRA rank
-optuna_epochs: 1               # Epochs per trial (fast probing)
+# ---- Logging ----
+logging_steps: 5               # Frequent loss reporting for monitoring

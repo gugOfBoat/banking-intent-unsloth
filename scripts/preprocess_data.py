@@ -1,11 +1,12 @@
 """
 preprocess_data.py
 -------------------
-Load PolyAI/banking77 raw CSVs, stratified-sample across all 77 intent
-classes, and export train / val / test splits.
+Load PolyAI/banking77 raw CSVs and export train / val / test splits.
 
-Samples per class  →  Train: 25 | Val: 5 | Test: 5
-Output columns     →  text, intent   (no prompt formatting)
+Mode: FULL DATASET
+  - Val: 10 per class | Test: 10 per class | Train: ALL REMAINING
+  - This yields ~9,200 train / 770 val / 770 test samples
+Output columns  →  text, intent   (no prompt formatting)
 """
 
 import io
@@ -19,9 +20,8 @@ from urllib3.util.retry import Retry
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TRAIN_PER_CLASS = 25
-VAL_PER_CLASS   = 5
-TEST_PER_CLASS  = 5
+VAL_PER_CLASS   = 10
+TEST_PER_CLASS  = 10
 RANDOM_SEED     = 42
 
 METADATA_URL = (
@@ -61,7 +61,7 @@ def fetch_metadata():
 
 
 def load_csv(url: str, tag: str) -> pd.DataFrame:
-    print(f"[{tag}] ↓ {url.split('/')[-1]}")
+    print(f"[{tag}] Downloading {url.split('/')[-1]}")
     return pd.read_csv(io.StringIO(_get(url)))
 
 
@@ -90,13 +90,13 @@ def process(labels, train_url, test_url):
 
     train_parts, val_parts, test_parts = [], [], []
 
-    print("[4/5] Stratified sampling …")
+    print("[4/5] Full-dataset split (holdout val+test, rest -> train) ...")
     for _, group in pool.groupby(label_col):
         g = group.sample(frac=1, random_state=RANDOM_SEED)  # shuffle group
-        train_parts.append(g.iloc[:TRAIN_PER_CLASS])
-        val_parts.append(g.iloc[TRAIN_PER_CLASS: TRAIN_PER_CLASS + VAL_PER_CLASS])
-        test_parts.append(g.iloc[TRAIN_PER_CLASS + VAL_PER_CLASS:
-                                  TRAIN_PER_CLASS + VAL_PER_CLASS + TEST_PER_CLASS])
+        # Reserve fixed holdout for val & test, everything else → train
+        val_parts.append(g.iloc[:VAL_PER_CLASS])
+        test_parts.append(g.iloc[VAL_PER_CLASS: VAL_PER_CLASS + TEST_PER_CLASS])
+        train_parts.append(g.iloc[VAL_PER_CLASS + TEST_PER_CLASS:])
 
     def collect(parts):
         df = pd.concat(parts, ignore_index=True)

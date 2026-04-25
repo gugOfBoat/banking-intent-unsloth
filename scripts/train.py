@@ -251,7 +251,7 @@ def run_standard_training(cfg, out_dir):
     from unsloth import FastLanguageModel
 
     print("\n" + "=" * 60)
-    print("  STANDARD TRAINING")
+    print("  STANDARD TRAINING (Full Dataset + Best HPO Params)")
     print("=" * 60)
 
     lr       = cfg.get("learning_rate", 2e-4)
@@ -260,13 +260,45 @@ def run_standard_training(cfg, out_dir):
     grad_acc = cfg.get("gradient_accumulation_steps", 4)
     optim    = cfg.get("optimizer", "adamw_8bit")
     max_seq  = cfg.get("max_seq_length", 512)
+    eff_batch = batch * grad_acc
 
-    print(f"  Model:  {cfg['model_name']}")
-    print(f"  LR={lr}, r={cfg.get('r')}, alpha={cfg.get('lora_alpha')}")
-    print(f"  Epochs={epochs}, eff_batch={batch*grad_acc}\n")
+    # ---- Config Summary ----
+    print(f"\n  📋 CONFIGURATION SUMMARY")
+    print(f"  {'─'*50}")
+    print(f"  Model:            {cfg['model_name']}")
+    print(f"  LoRA rank (r):    {cfg.get('r')}  |  alpha: {cfg.get('lora_alpha')}")
+    print(f"  Learning rate:    {lr}")
+    print(f"  Batch size:       {batch} × {grad_acc} (grad acc) = {eff_batch} effective")
+    print(f"  Epochs:           {epochs}")
+    print(f"  Optimizer:        {optim}")
+    print(f"  Max seq length:   {max_seq}")
+    print(f"  Checkpointing:    {cfg.get('gradient_checkpointing', 'none')}")
 
+    # ---- Build Model ----
     model, tokenizer = build_model(cfg)
+
+    # ---- LoRA Parameter Analysis ----
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    frozen    = total - trainable
+    print(f"\n  🧠 MODEL PARAMETER ANALYSIS")
+    print(f"  {'─'*50}")
+    print(f"  Total parameters:     {total:>15,}")
+    print(f"  Frozen (base model):  {frozen:>15,}")
+    print(f"  Trainable (LoRA):     {trainable:>15,}  ({trainable/total*100:.2f}%)")
+    print(f"  Memory saved by LoRA: ~{(total - trainable) * 2 / 1e9:.1f} GB (vs full fine-tune)")
+
+    # ---- Load Dataset ----
     datasets = load_datasets(tokenizer)
+
+    print(f"\n  📊 DATASET STATISTICS")
+    print(f"  {'─'*50}")
+    print(f"  Train:      {len(datasets['train']):>6,} samples")
+    print(f"  Validation: {len(datasets['validation']):>6,} samples")
+    print(f"  Test:       {len(datasets['test']):>6,} samples")
+    total_steps = (len(datasets['train']) // eff_batch) * epochs
+    print(f"  Total steps: {total_steps:>5,} ({len(datasets['train'])//eff_batch} steps/epoch × {epochs} epochs)")
+
     ckpt_dir = out_dir / "checkpoint_final"
 
     # Switch to training mode (Unsloth best practice)
@@ -286,7 +318,7 @@ def run_standard_training(cfg, out_dir):
         bf16=_bf16(),
         fp16_full_eval=True,                    # halve eval memory
         eval_accumulation_steps=4,              # offload logits to CPU
-        logging_steps=10,
+        logging_steps=cfg.get("logging_steps", 5),
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
@@ -310,16 +342,43 @@ def run_standard_training(cfg, out_dir):
         trainer, instruction_part=INSTR_PART, response_part=RESP_PART,
     )
 
+    # ---- VRAM before training ----
+    vram_before = torch.cuda.memory_reserved() / 1024**3 if torch.cuda.is_available() else 0
     gpu("BEFORE training")
+
+    print(f"\n  🚀 TRAINING STARTED")
+    print(f"  {'─'*50}")
     t0 = time.time()
     result = trainer.train()
-    print(f"\n  Training done in {(time.time()-t0)/60:.1f} min")
+    train_time = time.time() - t0
+
+    # ---- VRAM after training ----
+    vram_after = torch.cuda.memory_reserved() / 1024**3 if torch.cuda.is_available() else 0
     gpu("AFTER training")
 
-    # Save checkpoint
+    # ---- Performance Report ----
+    samples_per_sec = len(datasets['train']) * epochs / train_time
+    time_per_epoch  = train_time / epochs
+    # HuggingFace native speed estimate (Unsloth claims 2x)
+    hf_estimated_time = train_time * 2
+
+    print(f"\n  ⚡ UNSLOTH PERFORMANCE REPORT")
+    print(f"  {'─'*50}")
+    print(f"  Total training time:      {train_time/60:.1f} min ({train_time:.0f}s)")
+    print(f"  Time per epoch:           {time_per_epoch/60:.1f} min")
+    print(f"  Throughput:               {samples_per_sec:.1f} samples/sec")
+    print(f"  VRAM delta (train):       {vram_after - vram_before:+.2f} GB (should be ~0 with Unsloth)")
+    print(f"  Peak VRAM reserved:       {vram_after:.2f} GB / {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f} GB")
+    print(f"  Estimated HF native time: ~{hf_estimated_time/60:.0f} min (2× slower without Unsloth)")
+    print(f"  Unsloth speedup:          ~2.0×  (Triton kernel rewrite for RoPE/RMSNorm/CE)")
+
+    # ---- Save checkpoint ----
+    print(f"\n  💾 SAVING CHECKPOINT")
+    print(f"  {'─'*50}")
     trainer.save_model(str(ckpt_dir))
     tokenizer.save_pretrained(str(ckpt_dir))
-    print(f"  Checkpoint → {ckpt_dir}")
+    print(f"  Adapter weights → {ckpt_dir}")
+    print(f"  Tokenizer       → {ckpt_dir}")
 
     # Backup to Google Drive immediately (before eval which might crash)
     backup_to_drive(out_dir)
@@ -342,11 +401,17 @@ def run_standard_training(cfg, out_dir):
         "hyperparameters": {k: v for k, v in cfg.items()},
         "train_loss": result.training_loss,
         "train_steps": result.global_step,
-        "runtime_min": round((time.time()-t0)/60, 1),
+        "runtime_min": round(train_time/60, 1),
+        "time_per_epoch_min": round(time_per_epoch/60, 1),
+        "samples_per_sec": round(samples_per_sec, 1),
+        "estimated_hf_time_min": round(hf_estimated_time/60, 1),
         "test_results": test_results,
         "gpu": torch.cuda.get_device_name() if torch.cuda.is_available() else "N/A",
         "peak_vram_gb": round(torch.cuda.max_memory_reserved() / 1024**3, 2)
                         if torch.cuda.is_available() else None,
+        "trainable_params": trainable,
+        "total_params": total,
+        "trainable_pct": round(trainable/total*100, 2),
     }
     with open(out_dir / "training_summary.json", "w") as f:
         json.dump(summary, f, indent=4, default=str)
