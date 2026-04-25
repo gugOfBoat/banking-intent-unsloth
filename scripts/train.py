@@ -179,6 +179,7 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
     """
     Evaluate by generating predictions one-by-one.
     Uses inference VRAM (~2GB) instead of eval logits (~14GB).
+    Shows per-class F1 breakdown for key intents.
     """
     from unsloth import FastLanguageModel
 
@@ -194,9 +195,9 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
 
     y_true, y_pred = [], []
     correct = 0
+    t_eval = time.time()
 
     for i, row in df.iterrows():
-        # Plain text messages (Qwen2.5 is a text model, no VL format needed)
         msgs = [
             {"role": "system",  "content": SYSTEM_MSG},
             {"role": "user",    "content": f"Classify the banking intent: {row['text']}"},
@@ -222,21 +223,64 @@ def generative_eval(model, tokenizer, test_csv, label_map, out_dir):
             correct += 1
 
         if i < 5:  # show first 5 predictions
-            mark = "✅" if pred == truth else "❌"
+            mark = "+" if pred == truth else "X"
             print(f"  {mark} [{pred:<30s}] gt=[{truth}] | {row['text'][:60]}")
 
-    acc = correct / len(df)
-    f1  = f1_score(y_true, y_pred, average="micro", zero_division=0)
+    eval_time = time.time() - t_eval
 
-    print(f"\n  Accuracy: {acc:.4f} ({correct}/{len(df)})")
-    print(f"  F1 (micro): {f1:.4f}")
+    # ---- Overall Metrics ----
+    acc      = correct / len(df)
+    f1_micro = f1_score(y_true, y_pred, average="micro", zero_division=0)
+    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
-    results = {"accuracy": acc, "f1_micro": f1, "correct": correct,
-               "total": len(df)}
+    print(f"\n  {'='*60}")
+    print(f"  OVERALL RESULTS ({len(df)} samples, {eval_time:.0f}s)")
+    print(f"  {'='*60}")
+    print(f"  Accuracy:       {acc:.4f}  ({correct}/{len(df)})")
+    print(f"  F1 (micro):     {f1_micro:.4f}")
+    print(f"  F1 (macro):     {f1_macro:.4f}")
+    print(f"  F1 (weighted):  {f1_weighted:.4f}")
+
+    # ---- Per-Class F1 Breakdown ----
+    report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+    class_scores = {k: v for k, v in report.items()
+                    if isinstance(v, dict) and "f1-score" in v
+                    and k not in ("micro avg", "macro avg", "weighted avg", "accuracy")}
+
+    if class_scores:
+        sorted_classes = sorted(class_scores.items(), key=lambda x: x[1]["f1-score"], reverse=True)
+        top5 = sorted_classes[:5]
+        bot5 = sorted_classes[-5:]
+
+        print(f"\n  TOP-5 BEST INTENTS (by F1):")
+        print(f"  {'Intent':<35} {'F1':>6}  {'Prec':>6}  {'Rec':>6}  {'N':>4}")
+        print(f"  {'─'*60}")
+        for name, sc in top5:
+            print(f"  {name:<35} {sc['f1-score']:>6.3f}  {sc['precision']:>6.3f}  {sc['recall']:>6.3f}  {sc['support']:>4.0f}")
+
+        print(f"\n  BOTTOM-5 WEAKEST INTENTS (by F1):")
+        print(f"  {'Intent':<35} {'F1':>6}  {'Prec':>6}  {'Rec':>6}  {'N':>4}")
+        print(f"  {'─'*60}")
+        for name, sc in bot5:
+            print(f"  {name:<35} {sc['f1-score']:>6.3f}  {sc['precision']:>6.3f}  {sc['recall']:>6.3f}  {sc['support']:>4.0f}")
+
+    # ---- Save Results ----
+    results = {
+        "accuracy": acc,
+        "f1_micro": f1_micro,
+        "f1_macro": f1_macro,
+        "f1_weighted": f1_weighted,
+        "correct": correct,
+        "total": len(df),
+        "eval_time_sec": round(eval_time, 1),
+        "top5_intents": {n: round(s["f1-score"], 4) for n, s in top5} if class_scores else {},
+        "bot5_intents": {n: round(s["f1-score"], 4) for n, s in bot5} if class_scores else {},
+    }
 
     with open(out_dir / "test_results.json", "w") as f:
         json.dump(results, f, indent=4)
-    print(f"  Results → {out_dir / 'test_results.json'}")
+    print(f"\n  Results -> {out_dir / 'test_results.json'}")
 
     # Switch back to training mode in case caller needs it
     FastLanguageModel.for_training(model)

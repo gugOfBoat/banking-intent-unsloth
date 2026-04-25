@@ -33,7 +33,7 @@ The core challenge: Fine-tuning a 3-Billion parameter LLM on a **single Tesla T4
 **Key Results:**
 - ✅ Model: `Qwen2.5-3B-Instruct` (4-bit NF4 quantized via Unsloth)
 - ✅ VRAM footprint: **~6 GB peak** (out of 15 GB available on T4)
-- ✅ Training: **5 epochs** on full 11,543-sample dataset
+- ✅ Training: **3 epochs** on full 11,543-sample dataset
 - ✅ Only **0.96% of parameters trainable** (29.9M LoRA / 3.1B total)
 - ✅ Hyperparameters pre-optimized via **Optuna HPO** (3 trials on subset)
 
@@ -194,7 +194,7 @@ model = FastLanguageModel.get_peft_model(
 | `learning_rate` | `1.75e-4` | **Optimized by Optuna HPO** (best of 3 trials on subset) |
 | `per_device_train_batch_size` | `8` | Larger batch for full dataset throughput |
 | `gradient_accumulation_steps` | `2` | Effective batch = 8×2 = 16 for stable gradients |
-| `num_train_epochs` | `5` | Full convergence on complete 11,543-sample dataset |
+| `num_train_epochs` | `3` | Full convergence on complete 11,543-sample dataset |
 | `warmup_ratio` | 0.03 | 3% linear warmup before cosine decay |
 | `optimizer` | `adamw_8bit` | Saves ~1.5 GB vs. standard 32-bit AdamW |
 | `gradient_checkpointing` | `"unsloth"` | Custom activation memory release; prevents VRAM spikes |

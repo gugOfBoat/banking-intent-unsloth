@@ -206,6 +206,8 @@ if __name__ == "__main__":
         print(f"  EVALUATING ON TEST SET: {len(df)} samples")
         print(f"{'='*60}")
 
+        import time as _time
+        t0 = _time.time()
         y_true, y_pred = [], []
         for i, row in df.iterrows():
             pred = clf(row["text"])
@@ -213,29 +215,59 @@ if __name__ == "__main__":
             y_true.append(truth)
             y_pred.append(pred)
 
-            mark = "✅" if pred == truth else "❌"
-            if i < 10 or pred != truth:  # show first 10 + all errors
+            mark = "+" if pred == truth else "X"
+            if i < 8 or pred != truth:  # show first 8 + all errors
                 print(f"  {mark} [{pred:<30s}] gt=[{truth}] | {row['text'][:60]}")
 
+        eval_time = _time.time() - t0
+        correct = sum(1 for a, b in zip(y_true, y_pred) if a == b)
         acc = accuracy_score(y_true, y_pred)
-        f1  = f1_score(y_true, y_pred, average="micro", zero_division=0)
+        f1_micro = f1_score(y_true, y_pred, average="micro", zero_division=0)
         f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+        f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
         print(f"\n{'='*60}")
-        print(f"  RESULTS")
+        print(f"  OVERALL RESULTS ({len(df)} samples, {eval_time:.0f}s)")
         print(f"{'='*60}")
-        print(f"  Accuracy:    {acc:.4f}  ({sum(1 for a,b in zip(y_true,y_pred) if a==b)}/{len(df)})")
-        print(f"  F1 (micro):  {f1:.4f}")
-        print(f"  F1 (macro):  {f1_macro:.4f}")
+        print(f"  Accuracy:       {acc:.4f}  ({correct}/{len(df)})")
+        print(f"  F1 (micro):     {f1_micro:.4f}")
+        print(f"  F1 (macro):     {f1_macro:.4f}")
+        print(f"  F1 (weighted):  {f1_weighted:.4f}")
+
+        # ---- Per-Class F1 Breakdown ----
+        from sklearn.metrics import classification_report
+        report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+        class_scores = {k: v for k, v in report.items()
+                        if isinstance(v, dict) and "f1-score" in v
+                        and k not in ("micro avg", "macro avg", "weighted avg", "accuracy")}
+
+        if class_scores:
+            sorted_classes = sorted(class_scores.items(), key=lambda x: x[1]["f1-score"], reverse=True)
+            top5 = sorted_classes[:5]
+            bot5 = sorted_classes[-5:]
+
+            print(f"\n  TOP-5 BEST INTENTS (by F1):")
+            print(f"  {'Intent':<35} {'F1':>6}  {'Prec':>6}  {'Rec':>6}  {'N':>4}")
+            print(f"  {'-'*60}")
+            for name, sc in top5:
+                print(f"  {name:<35} {sc['f1-score']:>6.3f}  {sc['precision']:>6.3f}  {sc['recall']:>6.3f}  {sc['support']:>4.0f}")
+
+            print(f"\n  BOTTOM-5 WEAKEST INTENTS (by F1):")
+            print(f"  {'Intent':<35} {'F1':>6}  {'Prec':>6}  {'Rec':>6}  {'N':>4}")
+            print(f"  {'-'*60}")
+            for name, sc in bot5:
+                print(f"  {name:<35} {sc['f1-score']:>6.3f}  {sc['precision']:>6.3f}  {sc['recall']:>6.3f}  {sc['support']:>4.0f}")
 
         # Save results
-        results = {"accuracy": acc, "f1_micro": f1, "f1_macro": f1_macro,
-                   "total": len(df), "correct": sum(1 for a,b in zip(y_true,y_pred) if a==b)}
+        results = {"accuracy": acc, "f1_micro": f1_micro, "f1_macro": f1_macro,
+                   "f1_weighted": f1_weighted,
+                   "total": len(df), "correct": correct,
+                   "eval_time_sec": round(eval_time, 1)}
         out_path = Path(args.config).resolve().parent.parent / "outputs" / "eval_results.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(results, f, indent=4)
-        print(f"  Results saved → {out_path}")
+        print(f"\n  Results saved -> {out_path}")
 
     elif args.message:
         # ---- Single prediction ----
