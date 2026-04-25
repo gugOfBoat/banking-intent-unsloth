@@ -57,10 +57,11 @@ When HuggingFace's native `SFTTrainer` computes gradients (backward pass), it ne
 | **Optimizer State Compression** | `adamw_8bit` stores optimizer momentum in 8-bit instead of 32-bit | Saves **~1.5 GB** of optimizer state memory |
 
 ### Evidence from Our Training Logs
-```
-[BEFORE load]    Tesla T4 | 3.82 GB allocated  | free ~10.70 GB
-[AFTER LoRA]     Tesla T4 | 5.93 GB allocated  | free ~8.49 GB   ← Entire model + LoRA
-[AFTER training] Tesla T4 | 5.93 GB allocated  | free ~8.49 GB   ← No spike during training!
+```text
+[BEFORE load]    Tesla T4 | 0.01 GB allocated  | free ~14.54 GB
+[AFTER base load]Tesla T4 | 1.95 GB allocated  | free ~12.59 GB
+[AFTER LoRA]     Tesla T4 | 2.07 GB allocated  | free ~12.48 GB   ← Entire model + LoRA
+[Training Loop]  Tesla T4 | ~2.08 GB allocated | free ~12.48 GB   ← No spike during training!
 ```
 The VRAM **did not increase at all** between LoRA initialization and end of training. This flat memory profile is impossible with standard HuggingFace SFTTrainer and is the direct result of Unsloth's custom gradient checkpointing.
 
@@ -354,30 +355,24 @@ When invoked with `--tune`, the training script launches an **automated hyperpar
 ```
 
 ```bash
-# Cell 2: Train with Optuna HPO
-!python scripts/train.py --tune
+# Cell 2: Train for 3 Epochs
+!bash train.sh
 ```
 
 ```bash
-# Cell 3: Evaluate on test set
-!python scripts/inference.py --eval --config configs/inference.yaml
-```
-
-```bash
-# Cell 4: Single query prediction
-!python scripts/inference.py --config configs/inference.yaml \
-    --message "Why is my transfer declining?"
+# Cell 3: Evaluate on test set + Single query prediction
+!bash inference.sh
 ```
 
 ### Option B: Using Shell Wrappers (Production-style)
 
-**`train.sh`** — Automates data prep → HPO → final training in one command:
+**`train.sh`** — Automates data prep → final training in one command:
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-# Preprocess data + Optuna HPO + Final training
+# Preprocess data (Full 11,543 dataset) + Final training (Best Params)
 python scripts/preprocess_data.py
-python scripts/train.py --tune --config configs/train.yaml --output outputs/run
+python scripts/train.py --config configs/train.yaml --output outputs/run
 ```
 
 **`inference.sh`** — Loads checkpoint, evaluates test set, and predicts a demo query:
@@ -395,7 +390,7 @@ echo "  BANKING INTENT INFERENCE PIPELINE"
 echo "============================================================"
 
 # Full test set evaluation (accuracy + F1)
-echo "[1/2] Evaluating on hold-out test set (385 samples)..."
+echo "[1/2] Evaluating on hold-out test set (770 samples)..."
 python scripts/inference.py --eval --config configs/inference.yaml
 
 # Single message demo
@@ -410,26 +405,54 @@ python scripts/inference.py --config configs/inference.yaml --message "I acciden
 
 ## 📊 9. Training Logs & VRAM Evidence
 
-### VRAM Profile (Tesla T4 — 14.56 GB Total)
-```
-[BEFORE load]    Tesla T4 | 3.82 / 14.56 GB | free ~10.70 GB
-[AFTER LoRA]     Tesla T4 | 5.93 / 14.56 GB | free ~8.49 GB
-[AFTER training] Tesla T4 | 5.93 / 14.56 GB | free ~8.49 GB  ← Zero spike!
-[INFERENCE mode]           | 5.93 / 14.56 GB | free ~8.49 GB
+### 9.1 VRAM Profile (Tesla T4 — 14.56 GB Total)
+HuggingFace without Unsloth would crash instantly by spiking to ~14GB. With Unsloth's custom checkpointing, our allocated VRAM stays beautifully flat during training.
+
+```text
+[BEFORE load]    Tesla T4 | 0.01 / 14.56 GB | free ~14.54 GB
+[AFTER base load]Tesla T4 | 1.95 / 14.56 GB | free ~12.59 GB
+[AFTER LoRA]     Tesla T4 | 2.07 / 14.56 GB | free ~12.48 GB 
+[INFERENCE mode] Tesla T4 | 2.07 / 14.56 GB | free ~12.48 GB
 ```
 
-### Unsloth Banner (Proof of Acceleration)
+#### The "Flat" VRAM Phenomenon (ASCII Chart)
+```text
+VRAM (GB)
+ 15 |                                    <-- (OOM Zone with Standard HF)
+    |
+ 10 |
+    |
+  5 |
+    |    Training Begins (No Spikes!)
+  2 |  ______________________________________________________
+  1 | /
+  0 |/
+    --------------------------------------------------------
+    Init      Epoch 1        Epoch 2        Epoch 3      End
 ```
+> Total Training Time: ~1 hour 50 minutes (2166 steps, ~2.7s per iteration).
+
+### 9.2 Unsloth Banner (Proof of Acceleration)
+```text
 ==((====))==  Unsloth - 2x faster free finetuning | Num GPUs used = 1
-   \\   /|    Num examples = 1,925 | Num Epochs = 1 | Total steps = 121
-O^O/ \_/ \    Batch size per device = 4 | Gradient accumulation steps = 4
-\        /    Data Parallel GPUs = 1 | Total batch size (4 x 4 x 1) = 16
+   \   /|    Num examples = 11,543 | Num Epochs = 3 | Total steps = 2,166
+O^O/ \_/ \    Batch size per device = 8 | Gradient accumulation steps = 2
+\        /    Data Parallel GPUs = 1 | Total batch size (8 x 2 x 1) = 16
  "-____-"     Trainable parameters = 29,933,568 of 3,115,872,256 (0.96% trained)
 ```
 
-### Training Speed
-- **~16 minutes per epoch** on Tesla T4
-- **Total pipeline** (3 Optuna trials + 2-epoch final train): **~60 minutes**
+### 9.3 Evaluation Report (770 test samples)
+Generative Classification with Anti-Hallucination Regex (Time: 370s)
+* Overall F1 (Micro/Macro/Weighted): **0.9325**
+* Accuracy: **0.9325** (718/770)
+
+**Top 5 Intent Classes (F1 = 1.000)**
+* `Refund_not_showing_up`, `activate_my_card`, `apple_pay_or_google_pay`, `atm_support`, `automatic_top_up`.
+
+**Bottom 5 Intent Classes**
+* `declined_card_payment` (0.800), `card_payment_not_recognised` (0.762), `transfer_into_account` (0.762), `transfer_not_received_by_recipient` (0.762), `balance_not_updated_after_bank_transfer` (0.706).
+*(These categories share highly overlapping semantic triggers with other payment failures).*
+
 
 ---
 
