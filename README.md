@@ -465,9 +465,7 @@ A complete walk-through covering:
 - Full test set evaluation (Accuracy & F1)
 - Single query live prediction
 
-👉 **[[Click Here to Watch the Video Demonstration on Google Drive]](#)** 👈
-
-*(Replace `#` with the actual Google Drive public link before final submission)*
+👉 **[Click Here to Watch the Video Demonstration on Google Drive](https://drive.google.com/file/d/1XB2IK0U73YR0D7ESXSuNSPuo9PYMMm0v/view?usp=sharing)** 👈
 
 ---
 
